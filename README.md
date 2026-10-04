@@ -7,3 +7,11 @@ G-code macros and generators for the Makera Z1 desktop CNC, run from Makera Stud
 | [surface-stock](surface-stock) | Probes uneven stock and faces it flat |
 
 Not affiliated with Makera. Check every job before running it on your machine.
+
+## Contributing
+
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for what to include and the Z1 firmware quirks to know about.
+
+## License
+
+[MIT](LICENSE)
