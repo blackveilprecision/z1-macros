@@ -5,6 +5,8 @@ G-code macros and generators for the Makera Z1 desktop CNC, run from Makera Stud
 | Folder | What it does |
 |---|---|
 | [surface-stock](surface-stock) | Probes uneven stock and faces it flat |
+| [face-to-thickness](face-to-thickness) | Faces flat stock down to a set thickness |
+| [amazon-tool](amazon-tool) | Turns an Amazon cutter listing into a Fusion tool library file |
 
 Not affiliated with Makera. Check every job before running it on your machine.
 
