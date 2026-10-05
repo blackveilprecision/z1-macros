@@ -1,0 +1,65 @@
+name: Bug report
+description: A macro or script did something wrong or unexpected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. If the machine moved somewhere it shouldn't have, Studio's log shows exactly what it ran, so please include it.
+  - type: dropdown
+    id: macro
+    attributes:
+      label: Macro or script
+      options:
+        - surface-stock
+        - face-to-thickness
+        - amazon-tool
+        - Something else
+    validations:
+      required: true
+  - type: dropdown
+    id: machine
+    attributes:
+      label: Machine
+      options:
+        - Makera Z1
+        - Makera Z1 Pro
+        - Doesn't involve the machine
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Firmware and Makera Studio for a G-code macro; Python, and Fusion for amazon-tool.
+      placeholder: firmware 1.1.2, Studio 1.2.3, Python 3.12
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or options
+      description: What you ran, with every option you changed.
+      placeholder: ./surface-stock.py --stock-width 80 --stock-length 40 --target-z -2
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Studio log or script output
+      description: |
+        Studio's log is in `~/Library/Application Support/MakeraStudio/logs` on macOS. Paste the lines from `Playing file:` onward. For a script, paste everything it printed.
+      render: text

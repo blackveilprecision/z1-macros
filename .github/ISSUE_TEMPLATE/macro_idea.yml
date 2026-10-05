@@ -1,0 +1,29 @@
+name: Macro idea or improvement
+description: Something you'd like a macro or script to do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: job
+    attributes:
+      label: What do you want to do?
+      description: The job on the machine, or the change to an existing macro.
+      placeholder: Drill a bolt circle from a few numbers, without drawing it in CAM first.
+    validations:
+      required: true
+  - type: textarea
+    id: now
+    attributes:
+      label: How do you do it now?
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Stock, sizes, tools, workholding. Anything that changes how the job has to run.
+  - type: dropdown
+    id: test
+    attributes:
+      label: Can you test it on a machine?
+      options:
+        - Yes, on a Z1
+        - Yes, on a Z1 Pro
+        - "No"

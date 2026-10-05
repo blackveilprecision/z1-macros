@@ -1,0 +1,35 @@
+name: Tool listing read wrong
+description: amazon-tool read a listing's sizes or type wrong, or refused it
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Sellers' listings are often wrong, so it helps to know where the right values come from (the tool itself, the maker's drawing, the packaging).
+  - type: input
+    id: link
+    attributes:
+      label: Amazon link
+      placeholder: https://www.amazon.com/dp/B0D4VP4R2C
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: What the script printed
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: wrong
+    attributes:
+      label: What's wrong
+      description: Which values are wrong, what they should be, and how you know.
+      placeholder: Flute length should be 8 mm (measured); the listing's "Cutting Length" is the overall length.
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Python and Fusion versions
+      placeholder: Python 3.12, Fusion 2.0.20000

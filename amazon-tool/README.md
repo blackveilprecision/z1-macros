@@ -6,7 +6,7 @@ Supported types: flat end mills, ball end mills, chamfer mills (chamfer and V-bi
 
 ## Requirements
 
-- Python 3.8 or later, no packages
+- Python 3.9 or later (the `python3` macOS ships works), no packages
 - Fusion, with at least one tool of each type you want to add in a local library. Makera's libraries cover all four, with the Carvera holder the Z1 uses.
 
 ## Use

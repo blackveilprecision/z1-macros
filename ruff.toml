@@ -1,0 +1,4 @@
+# `ruff check` in CI: syntax errors and pyflakes (undefined names, unused imports and variables).
+# No style rules; match the code around your change instead.
+[lint]
+select = ["E9", "F"]

@@ -1,5 +1,7 @@
 # z1-macros
 
+[![CI](https://github.com/blackveilprecision/z1-macros/actions/workflows/ci.yml/badge.svg)](https://github.com/blackveilprecision/z1-macros/actions/workflows/ci.yml)
+
 G-code macros and generators for the Makera Z1 desktop CNC, run from Makera Studio.
 
 | Folder | What it does |
