@@ -6,7 +6,10 @@ from helpers import ORIGINS, ROOT, levels, plunges_over_stock, run
 
 SCRIPT = ROOT / "face-to-thickness" / "face-to-thickness.py"
 SURFACE_STOCK = ROOT / "surface-stock" / "surface-stock.py"
-WIDTH, LENGTH, RADIUS = 69.0, 50.1, 3.175 / 2  # the script's defaults
+WIDTH, LENGTH, RADIUS = 69.0, 50.1, 3.175 / 2
+# Spelled out rather than left to the defaults, which are meant to be edited for each stock
+STOCK = ("--stock-width", WIDTH, "--stock-length", LENGTH, "--origin", "topBackRight")
+FACE = (*STOCK, "--stock-height", 17, "--final-height", 10)
 
 
 def generate(test, script, *args):
@@ -19,7 +22,7 @@ def generate(test, script, *args):
 
 class FaceToThickness(unittest.TestCase):
     def test_default_job_takes_17_to_10(self):
-        program = generate(self, SCRIPT)
+        program = generate(self, SCRIPT, *FACE)
         self.assertIn("Faces 17 -> 10 mm thick", program)
         self.assertLess(program.index("T0 M6"), program.index("T1 M6"), "probe before the cutter")
         zs = levels(program)
@@ -29,7 +32,7 @@ class FaceToThickness(unittest.TestCase):
         self.assertTrue(all(abs(s - 0.2) < 1e-3 for s in steps), steps)
 
     def test_passes_are_equal_when_the_depth_does_not_divide(self):
-        zs = levels(generate(self, SCRIPT, "--stock-height", 16.9))
+        zs = levels(generate(self, SCRIPT, *FACE, "--stock-height", 16.9))
         steps = [a - b for a, b in zip([0.0] + zs, zs)]
         self.assertEqual(len(zs), 35)
         self.assertAlmostEqual(zs[-1], -6.9, places=3)
@@ -39,18 +42,18 @@ class FaceToThickness(unittest.TestCase):
     def test_plunges_land_off_the_stock_for_every_origin(self):
         for origin in ORIGINS:
             with self.subTest(origin=origin):
-                program = generate(self, SCRIPT, "--origin", origin)
+                program = generate(self, SCRIPT, *FACE, "--origin", origin)
                 self.assertEqual(plunges_over_stock(program, origin, WIDTH, LENGTH, RADIUS), [])
 
     def test_cuts_the_same_as_surface_stock(self):
-        ours = generate(self, SCRIPT)
+        ours = generate(self, SCRIPT, *FACE)
         theirs = generate(
-            self, SURFACE_STOCK, "--probe-grid-x", 0, "--top-margin", 0, "--target-z", -7, "--stock-height", 17
+            self, SURFACE_STOCK, *STOCK, "--probe-grid-x", 0, "--top-margin", 0, "--target-z", -7, "--stock-height", 17
         )
         self.assertEqual(ours[ours.index("\nM7\n"):], theirs[theirs.index("\nM7\n"):])
 
     def test_without_probing(self):
-        program = generate(self, SCRIPT, "--no-probe")
+        program = generate(self, SCRIPT, *FACE, "--no-probe")
         self.assertNotIn("T0", program)
         self.assertNotIn("G38", program)
 

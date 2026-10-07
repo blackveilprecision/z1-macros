@@ -5,14 +5,16 @@ from pathlib import Path
 from helpers import ORIGINS, ROOT, levels, moves, plunges_over_stock, run
 
 SCRIPT = ROOT / "surface-stock" / "surface-stock.py"
-WIDTH, LENGTH, RADIUS = 69.0, 50.1, 3.175 / 2  # the script's defaults
+WIDTH, LENGTH, RADIUS = 69.0, 50.1, 3.175 / 2
+# Spelled out rather than left to the defaults, which are meant to be edited for each stock
+STOCK = ("--stock-width", WIDTH, "--stock-length", LENGTH, "--stock-height", 19.9, "--target-z", -3, "--origin", "topBackRight")
 
 
 class SurfaceStock(unittest.TestCase):
     def generate(self, *args):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "job.nc"
-            r = run(SCRIPT, *args, "-o", out)
+            r = run(SCRIPT, *STOCK, *args, "-o", out)
             self.assertEqual(r.returncode, 0, r.stderr)
             return out.read_text()
 
