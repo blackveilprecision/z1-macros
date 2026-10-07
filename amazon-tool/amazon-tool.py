@@ -32,11 +32,19 @@ import zipfile
 from fractions import Fraction
 from pathlib import Path
 
-# Fusion's local tool libraries, searched for a template of the same type (add others with --library)
+# Searched for a template of the same type after --library: the repo's tool library (our tools, then Makera's),
+# then Fusion's local tool libraries. Z1_TOOLS (paths separated by os.pathsep) replaces them, as in toollib.
+TOOL_LIBRARY = Path(__file__).resolve().parent.parent / "tool-library"
 LOCAL_LIBRARIES = [
     Path.home() / "Library/Application Support/Autodesk/CAM360/libraries/Local",  # macOS
     *([Path(os.environ["APPDATA"]) / "Autodesk/CAM360/libraries/Local"] if "APPDATA" in os.environ else []),  # Windows
 ]
+
+
+def template_roots():
+    if os.environ.get("Z1_TOOLS"):
+        return [Path(p) for p in os.environ["Z1_TOOLS"].split(os.pathsep) if p]
+    return [TOOL_LIBRARY / "custom", TOOL_LIBRARY / "cache", *LOCAL_LIBRARIES]
 
 INCH = 25.4
 HEADERS = {
@@ -260,7 +268,7 @@ def candidates(listing):
         add("shank", max(a, b), SIZE, where)
         add("dia", min(a, b), SIZE, where)
         add("flute_length", c, SIZE, where)
-    m = re.match(r'\s*(\d+/\d+|\d*\.?\d+)\s*-\s*(\d*\.?\d+)\s*"', size)
+    m = re.search(r'(?<![\d/.])(\d+/\d+|\d*\.?\d+)\s*-\s*(\d*\.?\d+)\s*"', size)  # "1/8-2" 4PCS", "DLC EXL 1/4-2.5" 2PC"
     if m and float(m[2]) * INCH > 4 * to_mm(m[1], '"'):
         where = f'size "{size}" read as diameter-overall length'
         add("dia", to_mm(m[1], '"'), SIZE, where)
@@ -390,8 +398,9 @@ def library_tools(extra):
         except (OSError, StopIteration, zipfile.BadZipFile, json.JSONDecodeError) as e:
             raise SystemExit(f"amazon-tool: can't read the Fusion library {path} ({e})")
         pool += [(path, library, tool) for tool in library.get("data", [])]
-    for root in LOCAL_LIBRARIES:
-        for path in sorted(root.rglob("*.json")) if root.is_dir() else []:
+    for root in template_roots():
+        files = sorted(f for f in root.rglob("*") if f.suffix in (".json", ".tools")) if root.is_dir() else []
+        for path in files if root.is_dir() else [root] if root.is_file() else []:
             try:
                 library = load_library(path)
             except (OSError, StopIteration, zipfile.BadZipFile, json.JSONDecodeError):
@@ -515,7 +524,7 @@ def parse_args():
     p.add_argument("--type", choices=TYPES, help="tool type, if the listing's words don't say it")
     p.add_argument("--template", help="copy the holder and presets from the tool whose description contains this")
     p.add_argument("--library", type=Path, action="append", default=[], help="extra Fusion library (.json or exported .tools) to search for a template")
-    p.add_argument("-o", "--out", type=Path, help="output file (default: tools/<tool description>.json)")
+    p.add_argument("-o", "--out", type=Path, help="output file (default: ../tool-library/custom/<tool description>.json)")
     p.add_argument("--number", type=int, default=1, help="tool number (default: 1)")
     sizes = p.add_argument_group("override what the listing says (mm and degrees)")
     sizes.add_argument("--dia", type=float, help="cutting diameter; for a chamfer mill, the widest part of the cone")
@@ -607,7 +616,7 @@ def main():
 
     # Fusion names an imported library after its file: the description, with 1/8" written as 1-8in
     name = re.sub(r'[<>:\\|?*\x00-\x1f]+', "", t["description"].replace('"', "in").replace("/", "-")).strip(" .")
-    out = args.out or HERE / "tools" / f"{name}.json"
+    out = args.out or TOOL_LIBRARY / "custom" / f"{name}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"data": [tool], "version": library.get("version", 37)}, indent=4, sort_keys=True) + "\n")
 

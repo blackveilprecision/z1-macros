@@ -85,7 +85,7 @@ class AmazonTool(unittest.TestCase):
         output = ["-o", self.tmp / "out.json"] if out else []
         r = run(
             script, "--html", html, "--library", self.library, *output, *args,
-            env={"HOME": home, "USERPROFILE": home, "APPDATA": None},
+            env={"HOME": home, "USERPROFILE": home, "APPDATA": None, "Z1_TOOLS": home},  # only --library
         )
         tool = None
         if r.returncode == 0 and out:
@@ -208,13 +208,30 @@ class AmazonTool(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("no metric drill", r.stderr)
 
-    def test_default_output_is_named_after_the_tool(self):
-        script = self.tmp / "amazon-tool.py"
+    def test_default_output_goes_into_the_tool_library(self):
+        (self.tmp / "amazon-tool").mkdir()
+        script = self.tmp / "amazon-tool" / "amazon-tool.py"
         shutil.copy(SCRIPT, script)
         r, _ = self.generate(FLAT, script=script, out=False)
         self.assertEqual(r.returncode, 0, r.stderr)
-        out = self.tmp / "tools" / "WEXWE 1-8in 4 Flute End Mill (MAH Coated).json"
-        self.assertTrue(out.exists(), list((self.tmp / "tools").iterdir()))
+        custom = self.tmp / "tool-library" / "custom"
+        self.assertTrue((custom / "WEXWE 1-8in 4 Flute End Mill (MAH Coated).json").exists(), list(custom.iterdir()))
+
+    def test_size_name_with_words_in_front(self):
+        # Shaped like WEXWE B0CXPD9ZWG: the flute length is only in the photos
+        page = listing(
+            'Tools 1/4" Extra Long Carbide Square End Mill for Aluminum, 2.5" Overall Length End Mill Bits, 3 Flute,'
+            ' CNC Router Bits 1/4 Shank (1/4-2.5" 2PCS)',
+            rows={"Size Name": 'DLC EXL 1/4-2.5" 2PC', "Cutting Diameter": "0.25 inches", "Number of Flutes": "3",
+                  "Brand Name": "WEXWE", "ASIN": "B0CXPD9ZWG"},
+        )
+        r, _ = self.generate(page)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("--flute-length", r.stderr)
+        r, tool = self.generate(page, "--flute-length", 25.4)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertGeometry(tool, DC=6.35, SFDM=6.35, LCF=25.4, OAL=63.5, NOF=3)
+        self.assertIn('size "DLC EXL 1/4-2.5" 2PC" read as diameter-overall length', r.stdout)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ Supported types: flat end mills, ball end mills, chamfer mills (chamfer and V-bi
 ./amazon-tool.py 'https://www.amazon.com/dp/B0D4VP4R2C'
 ```
 
-This writes `tools/WEXWE 1-8in 4 Flute End Mill (MAH Coated).json`, named after the tool (`1/8"` becomes `1-8in` in file names), and prints every value with where it was read. In Fusion's Tool Library, import the file; it comes in as a library named after the file. Drag the tool into your own library, then delete the imported one.
+This writes `../tool-library/custom/WEXWE 1-8in 4 Flute End Mill (MAH Coated).json`, named after the tool (`1/8"` becomes `1-8in` in file names), and prints every value with where it was read. The macros can then use it with `--tool` (see [tool-library](../tool-library)). In Fusion's Tool Library, import the file; it comes in as a library named after the file. Drag the tool into your own library, then delete the imported one.
 
 ```
 WEXWE 1/8" 4 Flute End Mill (MAH Coated)
@@ -47,7 +47,7 @@ Read the output before importing. Sellers' listings are often incomplete or wron
 | `--library FILE` | Also search another library (`.json`, or an exported `.tools`) for a template (repeatable) |
 | `--number` | Tool number (default 1) |
 | `--html PAGE` | Read a listing saved from your browser, if Amazon blocks the script |
-| `-o` | Output file instead of `tools/<description>.json` |
+| `-o` | Output file instead of `../tool-library/custom/<description>.json` |
 
 ## How values are read
 
@@ -65,7 +65,7 @@ Anything else missing stops the script with the flag to pass. Corner-radius, thr
 
 ## What is copied from the template
 
-The template is the tool of the same type in your libraries (Fusion's local libraries, plus any `--library`). It is the one with the closest angle (chamfer mills), then diameter, then shank, then the most presets.
+The template is the tool of the same type in any `--library`, then the [tool library](../tool-library) (`custom/`, then Makera's downloaded files), then Fusion's local libraries. It is the one with the closest angle (chamfer mills), then diameter, then shank, then the most presets.
 
 - **Holder and post settings:** copied as they are. The tool number is set to 1 (or `--number`), and the length and diameter offsets follow it.
 - **Body length:** from the template's formula. Makera's is `max(shoulder, overall - holder gauge - 12.5)`, the stick-out in the Carvera holder.
