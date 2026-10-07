@@ -1,0 +1,15 @@
+{
+  "about": "Makera's Fusion tool libraries. toollib.py downloads them from this commit into cache/; Makera's repo has no license, so they aren't copied here.",
+  "repo": "MakeraInc/CarveraProfiles",
+  "commit": "de08a657bdc9c230a094dbdba792acd70bfcdf32",
+  "folder": "CAM_Post_Processors/Fusion360-profiles/Tool Files",
+  "libraries": [
+    "Makera Ball Endmills.tools",
+    "Makera Corn Bits.tools",
+    "Makera Drill Bits.tools",
+    "Makera Engraving Bits.tools",
+    "Makera O Flute Bits.tools",
+    "Makera Other Tools.tools",
+    "Makera Thread Mills.tools"
+  ]
+}

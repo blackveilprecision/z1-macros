@@ -1,0 +1,262 @@
+{
+    "data": [
+        {
+            "BMC": "carbide",
+            "GRADE": "Mill Generic",
+            "description": "WEXWE 1/8\" 4 Flute End Mill (MAH Coated)",
+            "expressions": {
+                "tool_bodyLength": "max(tool_shoulderLength, (tool_overallLength - tool_holderGaugeLength -12.5 ))",
+                "tool_description": "'WEXWE 1/8\" 4 Flute End Mill (MAH Coated)'",
+                "tool_fluteLength": "12.7 mm",
+                "tool_overallLength": "50.8 mm",
+                "tool_productId": "'B0D4VP4R2C'",
+                "tool_productLink": "'https://www.amazon.com/dp/B0D4VP4R2C'",
+                "tool_shoulderLength": "12.7 mm",
+                "tool_vendor": "'WEXWE'"
+            },
+            "geometry": {
+                "CSP": false,
+                "DC": 3.175,
+                "HAND": true,
+                "LB": 31.8,
+                "LCF": 12.7,
+                "NOF": 4,
+                "OAL": 50.8,
+                "SFDM": 3.175,
+                "assemblyGaugeLength": 38.3,
+                "shoulder-diameter": 3.175,
+                "shoulder-length": 12.7
+            },
+            "guid": "470ea595-f684-40cb-93a3-38623301be6d",
+            "holder": {
+                "description": "Carvera ToolHolder",
+                "gaugeLength": 6.5,
+                "guid": "",
+                "product-id": "",
+                "product-link": "",
+                "segments": [
+                    {
+                        "height": 6.5,
+                        "lower-diameter": 7.5,
+                        "upper-diameter": 7.5
+                    },
+                    {
+                        "height": 0.5,
+                        "lower-diameter": 9,
+                        "upper-diameter": 10
+                    },
+                    {
+                        "height": 0.01,
+                        "lower-diameter": 16.6,
+                        "upper-diameter": 16.6
+                    }
+                ],
+                "type": "holder",
+                "unit": "millimeters",
+                "vendor": "Makera"
+            },
+            "last_modified": 1791234369881,
+            "post-process": {
+                "break-control": false,
+                "comment": "",
+                "diameter-offset": 1,
+                "length-offset": 1,
+                "live": true,
+                "manual-tool-change": false,
+                "number": 1,
+                "turret": 0
+            },
+            "product-id": "B0D4VP4R2C",
+            "product-link": "https://www.amazon.com/dp/B0D4VP4R2C",
+            "reference_guid": "e244642b-db28-4f56-90fe-3d13f50ba0f0",
+            "start-values": {
+                "presets": [
+                    {
+                        "description": "",
+                        "expressions": {
+                            "tool_rampSpindleSpeed": "13000 rpm",
+                            "tool_spindleSpeed": "13000 rpm"
+                        },
+                        "f_n": 0.015384615384615385,
+                        "f_z": 0.009615418005968678,
+                        "guid": "37ddd5b0-8e05-4535-b6db-e77a2bc4bcd9",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 13000,
+                        "n_ramp": 13000,
+                        "name": "Aluminum",
+                        "ramp-angle": 1.2,
+                        "stepdown": 0.2,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 129.66923677691872,
+                        "v_f": 500.00173631037126,
+                        "v_f_leadIn": 500,
+                        "v_f_leadOut": 500,
+                        "v_f_plunge": 200,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 500
+                    },
+                    {
+                        "description": "",
+                        "expressions": {
+                            "tool_rampSpindleSpeed": "13000 rpm",
+                            "tool_spindleSpeed": "13000 rpm"
+                        },
+                        "f_n": 0.007692307692307693,
+                        "f_z": 0.005769246188184257,
+                        "guid": "9d8eab08-282a-445b-b770-db2faa2b1828",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 13000,
+                        "n_ramp": 13000,
+                        "name": "Brass",
+                        "ramp-angle": 1.2,
+                        "stepdown": 0.1,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 129.66923677691872,
+                        "v_f": 300.00080178558136,
+                        "v_f_leadIn": 300,
+                        "v_f_leadOut": 300,
+                        "v_f_plunge": 100,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 300
+                    },
+                    {
+                        "description": "",
+                        "expressions": {
+                            "tool_rampSpindleSpeed": "13000 rpm",
+                            "tool_spindleSpeed": "13000 rpm"
+                        },
+                        "f_n": 0.007692307692307693,
+                        "f_z": 0.005769246188184257,
+                        "guid": "55cad8c8-7e35-46ae-a0a2-9b02cad1f365",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 13000,
+                        "n_ramp": 13000,
+                        "name": "Copper",
+                        "ramp-angle": 1.2,
+                        "stepdown": 0.1,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 129.66923677691872,
+                        "v_f": 300.00080178558136,
+                        "v_f_leadIn": 300,
+                        "v_f_leadOut": 300,
+                        "v_f_plunge": 100,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 300
+                    },
+                    {
+                        "description": "",
+                        "expressions": {
+                            "tool_rampSpindleSpeed": "13000 rpm",
+                            "tool_spindleSpeed": "13000 rpm"
+                        },
+                        "f_n": 0.023076923076923078,
+                        "f_z": 0.019230812934952605,
+                        "guid": "da1614eb-1efa-4f06-96bf-38de41aa9429",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 13000,
+                        "n_ramp": 13000,
+                        "name": "Hardwood",
+                        "ramp-angle": 1.2,
+                        "stepdown": 1,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 129.66923677691872,
+                        "v_f": 1000.0022726175354,
+                        "v_f_leadIn": 1000,
+                        "v_f_leadOut": 1000,
+                        "v_f_plunge": 300,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 1000
+                    },
+                    {
+                        "description": "",
+                        "expressions": {
+                            "tool_rampSpindleSpeed": "13000 rpm",
+                            "tool_spindleSpeed": "13000 rpm"
+                        },
+                        "f_n": 0.023076923076923078,
+                        "f_z": 0.019230812934952605,
+                        "guid": "a7328f4f-d830-4099-9844-291f14c4eeb0",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 13000,
+                        "n_ramp": 13000,
+                        "name": "Plastic",
+                        "ramp-angle": 1.2,
+                        "stepdown": 1,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 129.66923677691872,
+                        "v_f": 1000.0022726175354,
+                        "v_f_leadIn": 1000,
+                        "v_f_leadOut": 1000,
+                        "v_f_plunge": 300,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 1000
+                    },
+                    {
+                        "description": "",
+                        "expressions": {
+                            "tool_rampSpindleSpeed": "13000 rpm",
+                            "tool_spindleSpeed": "13000 rpm"
+                        },
+                        "f_n": 0.015384615384615385,
+                        "f_z": 0.009615418005968678,
+                        "guid": "8b041b56-844f-4b30-82b1-0629e65d5fc0",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 13000,
+                        "n_ramp": 13000,
+                        "name": "Softwood",
+                        "ramp-angle": 1.2,
+                        "stepdown": 2,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 129.66923677691872,
+                        "v_f": 500.00173631037126,
+                        "v_f_leadIn": 500,
+                        "v_f_leadOut": 500,
+                        "v_f_plunge": 200,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 500
+                    }
+                ]
+            },
+            "type": "flat end mill",
+            "unit": "millimeters",
+            "vendor": "WEXWE"
+        }
+    ],
+    "version": 37
+}

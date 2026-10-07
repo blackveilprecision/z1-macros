@@ -34,7 +34,7 @@ class Repo(unittest.TestCase):
                     names = [node.module]
                 for name in names:
                     with self.subTest(script=script.name, module=name):
-                        self.assertIn(name.split(".")[0], sys.stdlib_module_names)
+                        self.assertIn(name.split(".")[0], {*sys.stdlib_module_names, "toollib"}, "toollib is the repo's own")
 
     def test_no_generated_files_are_committed(self):
         try:

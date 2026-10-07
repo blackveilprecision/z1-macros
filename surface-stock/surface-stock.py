@@ -19,6 +19,7 @@ Auto leveling OFF (it bends the cut to follow the uneven top).
 
 import argparse
 import math
+import sys
 from pathlib import Path
 
 # --- VARIABLES (dimensions are POSITIVE values) ---
@@ -74,6 +75,9 @@ def parse_args():
             p.add_argument(flag, default=default, choices=ORIGINS)
         else:
             p.add_argument(flag, type=type(default), default=default)
+    p.add_argument("--tool", help="take tool_dia, rpm, feeds, pass_depth and stepover from this tool in"
+                   " ../tool-library (see tool-library/toollib.py list); options you pass still win")
+    p.add_argument("--material", default="Aluminum", help="which of the tool's presets to use (default: Aluminum)")
     p.add_argument("-o", "--out", type=Path)
     p.add_argument("--probe-only", action="store_true", help="write a probe-grid test with no spindle or cutting")
     return p.parse_args()
@@ -294,6 +298,15 @@ def build_probe_test(v):
 def main():
     args = parse_args()
     v = {name: getattr(args, name) for name in VARIABLES}
+    if args.tool:  # the tool library is only needed with --tool, so this script also runs on its own
+        sys.path.insert(0, str(HERE.parent / "tool-library"))
+        import toollib
+
+        tool, preset = toollib.apply(v, args.tool, args.material)
+        print(
+            f"tool: {tool.description} ({tool.source}), {preset.name}: {fmt(v['tool_dia'])} mm, {v['rpm']} rpm,"
+            f" {v['feed']} mm/min, plunge {v['plunge_feed']}, {fmt(v['pass_depth'])} mm passes, {fmt(v['stepover'])} mm stepover"
+        )
     check(v)
     if args.probe_only:
         if not probing(v):

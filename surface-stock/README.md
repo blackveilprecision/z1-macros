@@ -34,6 +34,7 @@ In Makera Studio:
 | `--probe-clearance` | 5.0 | Lift between probe points |
 | `--top-margin` | 0.2 | First pass starts this far above Z0 |
 | `--rpm` / `--feed` / `--plunge-feed` | 12000 / 500 / 200 | Makera's 6061 values for a 3.175 mm metal end mill |
+| `--tool` / `--material` | | Take the cutter, feeds and speeds from a tool in [tool-library](../tool-library) and its preset for that material (default Aluminum); options you pass still win |
 
 ## How Z0 is found
 

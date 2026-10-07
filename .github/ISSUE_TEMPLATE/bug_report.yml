@@ -14,6 +14,7 @@ body:
         - surface-stock
         - face-to-thickness
         - amazon-tool
+        - tool-library
         - Something else
     validations:
       required: true

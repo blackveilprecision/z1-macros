@@ -32,6 +32,7 @@ In Makera Studio:
 | `--tool-dia` | 3.175 | Cutter diameter |
 | `--stepover` / `--pass-depth` | 2.0 / 0.2 | Max stepover and max depth per pass |
 | `--rpm` / `--feed` / `--plunge-feed` | 12000 / 500 / 200 | Makera's 6061 values for a 3.175 mm metal end mill |
+| `--tool` / `--material` | | Take the cutter, feeds and speeds from a tool in [tool-library](../tool-library) and its preset for that material (default Aluminum); options you pass still win |
 | `--no-probe` | off | Skip probing; set Z0 on the top in Studio yourself |
 
 ## How the depth is set

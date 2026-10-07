@@ -1,0 +1,237 @@
+{
+    "data": [
+        {
+            "BMC": "carbide",
+            "GRADE": "Mill Generic",
+            "description": "WEXWE 1/4\" 3 Flute End Mill (DLC Coated)",
+            "expressions": {
+                "tool_bodyLength": "max(tool_shoulderLength, (tool_overallLength - tool_holderGaugeLength -12.5 ))",
+                "tool_description": "'WEXWE 1/4\" 3 Flute End Mill (DLC Coated)'",
+                "tool_fluteLength": "25.4 mm",
+                "tool_overallLength": "63.5 mm",
+                "tool_productId": "'WEDLCE20240315'",
+                "tool_productLink": "'https://www.amazon.com/dp/B0CXPD9ZWG'",
+                "tool_shoulderLength": "25.4 mm",
+                "tool_vendor": "'WEXWE'"
+            },
+            "geometry": {
+                "CSP": false,
+                "DC": 6.35,
+                "HAND": true,
+                "LB": 44.5,
+                "LCF": 25.4,
+                "NOF": 3,
+                "OAL": 63.5,
+                "SFDM": 6.35,
+                "assemblyGaugeLength": 51.0,
+                "shoulder-diameter": 6.35,
+                "shoulder-length": 25.4
+            },
+            "guid": "ce8a5cc5-9f68-4b86-b330-ec00eb479e84",
+            "holder": {
+                "description": "Carvera ToolHolder",
+                "gaugeLength": 6.5,
+                "guid": "",
+                "product-id": "",
+                "product-link": "",
+                "segments": [
+                    {
+                        "height": 6.5,
+                        "lower-diameter": 7.5,
+                        "upper-diameter": 7.5
+                    },
+                    {
+                        "height": 0.5,
+                        "lower-diameter": 9,
+                        "upper-diameter": 10
+                    },
+                    {
+                        "height": 0.01,
+                        "lower-diameter": 16.6,
+                        "upper-diameter": 16.6
+                    }
+                ],
+                "type": "holder",
+                "unit": "millimeters",
+                "vendor": "Makera"
+            },
+            "last_modified": 1791342057395,
+            "post-process": {
+                "break-control": false,
+                "comment": "",
+                "diameter-offset": 1,
+                "length-offset": 1,
+                "live": true,
+                "manual-tool-change": false,
+                "number": 1,
+                "turret": 0
+            },
+            "product-id": "WEDLCE20240315",
+            "product-link": "https://www.amazon.com/dp/B0CXPD9ZWG",
+            "start-values": {
+                "presets": [
+                    {
+                        "description": "",
+                        "f_n": 0.016666642429354107,
+                        "f_z": 0.013888900000000003,
+                        "guid": "a84ff289-31c3-4ae3-a4fc-93059e87fb81",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 12000.017450890422,
+                        "n_ramp": 12000,
+                        "name": "Aluminum",
+                        "ramp-angle": 1.2,
+                        "stepdown": 0.2,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 239.38970833333332,
+                        "v_f": 500.001127121016,
+                        "v_f_leadIn": 500,
+                        "v_f_leadOut": 500,
+                        "v_f_plunge": 200,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 500
+                    },
+                    {
+                        "description": "",
+                        "f_n": 0.008333321214677053,
+                        "f_z": 0.008333333333333335,
+                        "guid": "47b86563-9e16-40fc-8614-d1046cedf18e",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 12000.017450890422,
+                        "n_ramp": 12000,
+                        "name": "Brass",
+                        "ramp-angle": 1.2,
+                        "stepdown": 0.1,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 239.38970833333332,
+                        "v_f": 300.0004362722606,
+                        "v_f_leadIn": 300,
+                        "v_f_leadOut": 300,
+                        "v_f_plunge": 100,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 300
+                    },
+                    {
+                        "description": "",
+                        "f_n": 0.008333321214677053,
+                        "f_z": 0.008333333333333335,
+                        "guid": "bf4e7366-ceb2-46f3-b20d-9fa8b33de248",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 12000.017450890422,
+                        "n_ramp": 12000,
+                        "name": "Copper",
+                        "ramp-angle": 1.2,
+                        "stepdown": 0.1,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 239.38970833333332,
+                        "v_f": 300.0004362722606,
+                        "v_f_leadIn": 300,
+                        "v_f_leadOut": 300,
+                        "v_f_plunge": 100,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 300
+                    },
+                    {
+                        "description": "",
+                        "f_n": 0.02499996364403116,
+                        "f_z": 0.02777776666666666,
+                        "guid": "ad410a4b-e0a8-4abf-8c83-cc3d395bf856",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 12000.017450890422,
+                        "n_ramp": 12000,
+                        "name": "Hardwood",
+                        "ramp-angle": 1.2,
+                        "stepdown": 1,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 239.38970833333332,
+                        "v_f": 1000.0010542402866,
+                        "v_f_leadIn": 1000,
+                        "v_f_leadOut": 1000,
+                        "v_f_plunge": 300,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 1000
+                    },
+                    {
+                        "description": "",
+                        "f_n": 0.02499996364403116,
+                        "f_z": 0.02777776666666666,
+                        "guid": "c6a8bdb9-d539-4bcc-88c8-1ace63514589",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 12000.017450890422,
+                        "n_ramp": 12000,
+                        "name": "Plastic",
+                        "ramp-angle": 1.2,
+                        "stepdown": 1,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 239.38970833333332,
+                        "v_f": 1000.0010542402866,
+                        "v_f_leadIn": 1000,
+                        "v_f_leadOut": 1000,
+                        "v_f_plunge": 300,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 1000
+                    },
+                    {
+                        "description": "",
+                        "f_n": 0.016666642429354107,
+                        "f_z": 0.013888900000000003,
+                        "guid": "5c094def-7c39-4dc2-bfb5-887538f3e0f2",
+                        "material": {
+                            "category": "all",
+                            "query": "",
+                            "use-hardness": false
+                        },
+                        "n": 12000.017450890422,
+                        "n_ramp": 12000,
+                        "name": "Softwood",
+                        "ramp-angle": 1.2,
+                        "stepdown": 2,
+                        "tool-coolant": "disabled",
+                        "use-stepdown": true,
+                        "use-stepover": false,
+                        "v_c": 239.38970833333332,
+                        "v_f": 500.001127121016,
+                        "v_f_leadIn": 500,
+                        "v_f_leadOut": 500,
+                        "v_f_plunge": 200,
+                        "v_f_ramp": 333.333,
+                        "v_f_transition": 500
+                    }
+                ]
+            },
+            "type": "flat end mill",
+            "unit": "millimeters",
+            "vendor": "WEXWE"
+        }
+    ],
+    "version": 36
+}
