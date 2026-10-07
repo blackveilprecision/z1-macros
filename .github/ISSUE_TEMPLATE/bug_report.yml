@@ -12,6 +12,7 @@ body:
       label: Macro or script
       options:
         - surface-stock
+        - surface-to-lowest-point
         - face-to-thickness
         - amazon-tool
         - tool-library
