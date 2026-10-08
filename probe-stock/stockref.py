@@ -214,6 +214,7 @@ class State:
     unknown: str = ""       # the last job not written here that played since: it may have cut the stock
     history: list = field(default_factory=list)  # [(time, what)]
     notes: list = field(default_factory=list)    # jobs that didn't finish
+    settled: dict = field(default_factory=dict)  # the stock as of the last run after which X0/Y0/Z0 were known
 
     @property
     def z0(self):
@@ -260,20 +261,36 @@ def apply(state, effect):
         raise SystemExit(f"stockref: unknown effect {effect['type']!r} in jobs.json; update the repo")
 
 
+def settle(state, run):
+    """Note the stock as it is after `run`: X0/Y0/Z0 are known here, so update() can write it to stock.json."""
+    state.settled = {
+        "anchor": {"name": run.name, "stamp": run.stamp, "log": run.log, "line": run.line},
+        "top": [list(x) for x in state.top],
+        "faces": {axis: [list(x) for x in pts] for axis, pts in state.faces.items()},
+        "machine": {"x": state.machine.x, "y": state.machine.y, "z": state.machine.z,
+                    "refmz": state.machine.refmz, "stamp": state.machine.stamp},
+        "history": [list(x) for x in state.history],
+        "unknown": state.unknown,
+    }
+
+
 def fold(reference, runs, registry, until=None):
     """The State: the probe run in `reference`, then every run after it in the log, or up to the run at
     `until` ((log, line)): probe runs before that one count as known, they print everything they change."""
     p, s, m = reference["probe"], reference["stock"], reference["machine"]
+    anchor = reference.get("anchor") or p  # update() moves the anchor on past the jobs it has written in
     state = State(
         probe=p, width=s["width"], length=s["length"], height=s["height"], origin=s["origin"],
         bed=reference["bed"], bed_from=reference["bed_from"], top=[tuple(x) for x in reference["top"]],
         faces={axis: [tuple(x) for x in pts] for axis, pts in reference["faces"].items()},
-        origin_xy=(m["x"], m["y"]), machine=Print(m["x"], m["y"], m["z"], m["refmz"], m["stamp"]),
+        origin_xy=tuple(reference.get("origin_xy") or (m["x"], m["y"])),
+        machine=Print(m["x"], m["y"], m["z"], m["refmz"], m["stamp"]),
+        unknown=reference.get("unknown", ""), history=[tuple(x) for x in reference.get("history", [])],
     )
     by_md5 = {e["md5"]: e for e in registry}
-    start = next((i for i, r in enumerate(runs) if (r.log, r.line) == (p["log"], p["line"])), None)
+    start = next((i for i, r in enumerate(runs) if (r.log, r.line) == (anchor["log"], anchor["line"])), None)
     if start is None:
-        state.unsure = f"the probe run of {p['stamp']} isn't in Studio's log any more, so what ran since is unknown"
+        state.unsure = f"the run of {anchor['stamp']} isn't in Studio's log any more, so what ran since is unknown"
         return state
 
     def after_end(run):  # what was logged once a run had ended: Studio's own probes, M498s from the console
@@ -309,6 +326,8 @@ def fold(reference, runs, registry, until=None):
                 state.unsure = state.unknown = f"{run.name} played ({run.stamp})"
             elif job and job.get("effect"):
                 state.notes.append(f"{run.name} started at {run.stamp}; the log doesn't show it ending, so it isn't counted")
+        if not state.unsure and (i == 0 or run.end is not None):
+            settle(state, run)
     return state
 
 

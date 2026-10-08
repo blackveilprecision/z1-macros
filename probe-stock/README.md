@@ -21,7 +21,7 @@ It's a separate job because the Z1 firmware (1.1.2) has no variables: `Z[#<depth
 3. `./probe-stock.py save` reads the run from the log, prints every point and writes `stock.json`.
 4. Run the macros.
 
-`./probe-stock.py show` prints the stock as it is now. `./probe-stock.py where` writes `probe-stock-where.nc`, which only prints X0/Y0/Z0 to the log. Run it when a macro says they may have moved.
+`./probe-stock.py update` brings `stock.json` itself up to date: it saves a newer probe run if there's a complete one, and writes in every job here that finished, so the file shows the stock as it is. It stops at the last point where X0/Y0/Z0 are known; anything after that is still read from the log, and the macros stop on it as before. `./probe-stock.py show` prints the stock as it is now. `./probe-stock.py where` writes `probe-stock-where.nc`, which only prints X0/Y0/Z0 to the log. Run it when a macro says they may have moved.
 
 | Option (`job`) | Default | Meaning |
 |---|---|---|
@@ -34,6 +34,9 @@ It's a separate job because the Z1 firmware (1.1.2) has no variables: `Z[#<depth
 | `--probe-inset` | 3 | Points this far in from the edges |
 | `--probe-clearance` | 5 | Lift between top points; more than the top's highest minus lowest point |
 | `--corner` | | Touch the origin corner's two sides with the rod and set X0/Y0, as Studio's corner probe does |
+| `--top-only` | | Only the anchor plate and the top, with the probe; `save` keeps the saved side touches |
+| `--side-only` | | Only the rod's side and corner touches; `save` keeps the saved top |
+| `--probe-rod-only` | | The rod does the anchor plate and the top too: one tool change, metal stock only |
 | `--side-x-points` / `--side-y-points` | 0 / 0 | Points on the side across from the origin: the right side and the back for a front-left origin |
 | `--side-depth` | 2 | Rod tip this far below the top for those |
 | `--side-clearance` | 5 | How far outside a side across from the origin the rod comes down; it searches twice that |
@@ -54,6 +57,16 @@ It's a separate job because the Z1 firmware (1.1.2) has no variables: `Z[#<depth
 G38.2 alarms and stops the job if a touch finds nothing.
 
 Before a file plays, Studio moves to the lowest X/Y in its preview, and its preview reads a `G38.2 X-20` as a position, not a distance. A job with 20 mm searches was sent to Y-20 and stopped at the soft limit. So every search is written after `G91`, which the firmware ignores for G38.2, and the searches away from the corner are kept to 10 mm. The furthest the job goes is the corner touches, 11 mm out, which is inside where Studio's own corner probe went on this machine.
+
+## Probing part of the stock again
+
+`--top-only` and `--side-only` re-probe one part and keep the rest. `save` merges the run into the saved reference as it stood just before the run, counting any job here that finished since. It refuses when the stock may have changed underneath:
+- a job not written here played in between
+- X0/Y0 moved more than 0.1 mm: a `--top-only` run finds them moved, or a `--side-only` run's corner touches land elsewhere
+
+If the stock moved, run the full job.
+
+With `--probe-rod-only` the rod does everything after one tool change: the anchor plate, the top point by the corner (which sets Z0 for the side touches), the sides and corner, then the rest of the top. Every touch on the top comes down at 100 mm/min, like Studio's rod probing. Each reading finishes at 100 mm/min whichever tool takes it, so the rod's and the probe's readings stay comparable.
 
 ## How the numbers are kept
 

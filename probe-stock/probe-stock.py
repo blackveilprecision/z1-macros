@@ -21,6 +21,7 @@ each .nc to the Z1 from Makera Studio under its own name.
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -86,6 +87,7 @@ def parse_args():
     job.add_argument("--probe-rod-only", action="store_true", help="the rod does the top and the anchor plate too: one tool, metal stock only")
     job.add_argument("-o", "--out", type=Path)
     for name, text in (("save", "read the last probe run from Studio's log into stock.json"),
+                       ("update", "bring stock.json up to date: save a newer probe run, and write in every job that finished"),
                        ("show", "print the stock as it is now"),
                        ("where", f"write {WHERE_JOB}, which only prints X0/Y0/Z0 to Studio's log")):
         s = sub.add_parser(name, help=text)
@@ -254,7 +256,7 @@ def probe_job(v, fenced, corner, only=None, rod_only=False):
 
     if rod_only or (sides and not tops):
         # One tool, the rod: the anchor plate, the first top point (Z0 for the side depths), the sides, the rest of the top
-        lines += [f"; The probe rod for everything, on metal stock only" if tops else "; The probe rod: the sides and the corner",
+        lines += ["; The probe rod for everything, on metal stock only" if tops else "; The probe rod: the sides and the corner",
                   f"T{v['rod_tool']} M6"]
         if plate:
             touches.append({"kind": "fence"})
@@ -368,7 +370,7 @@ def measure(run, plan):
         "probe": {"name": run.name, "stamp": run.stamp, "log": run.log, "line": run.line, "md5": run.md5},
         "stock": s,
         "rod_dia": plan.get("rod_dia"),
-        "bed": round(bed, 3),
+        "bed": None if bed is None else round(bed, 3),
         "bed_from": bed_from,
         "top": top,
         "faces": faces,
@@ -403,6 +405,7 @@ def merge(reference, plan, run, log):
                          f" moved, so the saved {'side touches' if only == 'top' else 'top'} no longer line up. {stop}")
     p = before.probe
     if only == "top":
+        reference["origin_xy"] = list(before.origin_xy)  # the corner as the rod last found it
         reference["faces"] = {axis: [list(x) for x in pts] for axis, pts in before.faces.items()}
         reference["sides_from"] = p.get("sides_from") or p["stamp"]
     else:
@@ -414,6 +417,62 @@ def merge(reference, plan, run, log):
             reference["rod_vs_saved_top"] = round(rod.z0 - saved, 3)
     reference["probe"].update({k: reference.get(k) for k in ("top_from", "sides_from") if reference.get(k)})
     return reference
+
+
+def save_newest(log):
+    """Save the newest probe run in Studio's log as stock.json; a --top-only or --side-only one is merged."""
+    run = newest_probe_run(log)
+    entry = next((e for e in stockref.jobs() if e["md5"] == run.md5 and e["kind"] == "probe"), None)
+    if entry is None:
+        raise SystemExit(
+            f"probe-stock: can't tell which {PROBE_JOB} played at {run.stamp}: "
+            + ("Studio's log has no upload of it before then." if run.md5 is None else "it isn't one written here.")
+            + " Write the job again (probe-stock.py job), upload it and run it"
+        )
+    reference = measure(run, entry["plan"])
+    if entry["plan"].get("only"):
+        reference = merge(reference, entry["plan"], run, log)
+    stockref.save(reference)
+    return reference
+
+
+def update(log):
+    """Bring stock.json up to date with Studio's log.
+
+    A probe run newer than the saved one is saved (merged, for --top-only and
+    --side-only). Then every job written here that finished since is written into
+    stock.json, up to the last run after which X0/Y0/Z0 are known: anything after
+    that (a job not written here, Studio's own probes) is still read from the log
+    by the next macro, which stops on it as before.
+    """
+    path = stockref.where() / "stock.json"
+    try:
+        state = stockref.load(log)
+    except SystemExit:
+        state = None
+    if state is None or state.newer_probe:
+        try:
+            save_newest(log)
+            print(f"saved the probe run of {newest_probe_run(log).stamp}")
+        except SystemExit as e:
+            if state is None:
+                raise
+            print(f"didn't save the newer probe run: {str(e).removeprefix('probe-stock: ')}")
+    state = stockref.load(log)
+    reference = json.loads(path.read_text(encoding="utf-8"))
+    settled = state.settled
+    anchor = reference.get("anchor") or reference["probe"]
+    if settled and (settled["anchor"]["log"], settled["anchor"]["line"]) != (anchor["log"], anchor["line"]):
+        new = settled["history"][len(reference.get("history", [])):]
+        reference.update(settled, origin_xy=list(state.origin_xy))
+        stockref.save(reference)
+        for stamp, text in new:
+            print(f"wrote in {stamp}  {text}")
+        print(f"stock.json now runs up to {settled['anchor']['name']} at {settled['anchor']['stamp']}")
+    else:
+        print("stock.json is up to date")
+    print()
+    describe(stockref.load(log))
 
 
 def describe(state):
@@ -475,19 +534,12 @@ def main():
         describe(stockref.load(args.log))
         return
 
+    if args.command == "update":
+        update(args.log)
+        return
+
     if args.command == "save":
-        run = newest_probe_run(args.log)
-        entry = next((e for e in stockref.jobs() if e["md5"] == run.md5 and e["kind"] == "probe"), None)
-        if entry is None:
-            raise SystemExit(
-                f"probe-stock: can't tell which {PROBE_JOB} played at {run.stamp}: "
-                + ("Studio's log has no upload of it before then." if run.md5 is None else "it isn't one written here.")
-                + " Write the job again (probe-stock.py job), upload it and run it"
-            )
-        reference = measure(run, entry["plan"])
-        if entry["plan"].get("only"):
-            reference = merge(reference, entry["plan"], run, args.log)
-        stockref.save(reference)
+        reference = save_newest(args.log)
         state = stockref.load(args.log)
         describe(state)
         moved = {a: d for a, d in reference["moved"].items() if abs(d) > 0.001}

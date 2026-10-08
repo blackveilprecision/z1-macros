@@ -291,6 +291,156 @@ class ProbeStock(unittest.TestCase):
             self.state().check("test")
         self.assertIn("+0.500, +0.000 mm", str(e.exception))
 
+    # --- --top-only, --side-only, --probe-rod-only ---
+
+    def full(self, widths=(63.6, 64.0, 64.3)):
+        """A full run with the rod on the right side and the corner, then the probe; returns the side widths."""
+        rod = TOP[0]
+        prints = [rod] + [(round(X0 + w - WIDTH, 3), Y0, rod) for w in widths] + [(X0, Y0, rod), (X0, Y0, rod)]
+        prints += [(X0, Y0, h) for h in (FENCE, *TOP)]
+        r, _ = self.machine.probe(*STOCK, "--corner", "--side-x-points", len(widths), prints=prints)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return widths
+
+    def saved(self):
+        return json.loads((self.tmp / "stock.json").read_text())
+
+    def test_top_only_job(self):
+        program = self.job("--top-only")
+        self.assertEqual(re.findall(r"^T(\d+) M6", program, re.M), ["0"])
+        self.assertEqual(len(re.findall(r"^M498\b", program, re.M)), 1 + POINTS)
+        r = self.job("--top-only", "--corner", ok=False)
+        self.assertIn("--top-only touches no sides", r.stderr)
+
+    def test_side_only_job(self):
+        program = self.job("--side-only", "--side-x-points", 3)
+        self.assertEqual(re.findall(r"^T(\d+) M6", program, re.M), ["9999"])
+        self.assertEqual(re.findall(r"^G10 L20 P0 ([XY]\S+)", program, re.M), ["X66.4"] * 3 + ["X-1", "Y-1"], "the corner puts X0/Y0 back")
+        self.assertNotIn("X-7.5 Y77", program, "no anchor plate")
+        self.assertEqual(len(re.findall(r"^M498\b", program, re.M)), 1 + 3 + 2)
+
+    def test_probe_rod_only_job(self):
+        program = self.job("--probe-rod-only", "--corner", "--side-x-points", 3)
+        self.assertZ1Safe(program)
+        self.assertEqual(re.findall(r"^T(\d+) M6", program, re.M), ["9999"], "one tool change")
+        self.assertLess(program.index("X-7.5 Y77"), program.index("G90 G0 X3 Y3"), "the anchor plate first")
+        self.assertLess(program.index("G90 G0 X3 Y3"), program.index("G10 L20 P0 X"), "Z0 on the top before the sides")
+        self.assertEqual(set(re.findall(r"G38\.2 Z-\S+ F(\d+)", program)), {"100"}, "every Z touch at the rod's speed")
+        self.assertEqual(len(re.findall(r"^M498\b", program, re.M)), 1 + POINTS + 3 + 2)
+
+    def test_probe_rod_only_saves_everything(self):
+        prints = [(X0, Y0, FENCE), TOP[0]] + [(round(X0 + w - WIDTH, 3), Y0, TOP[0]) for w in (63.6, 64.0, 64.3)]
+        prints += [(X0, Y0, TOP[0])] * 2 + [(X0, Y0, h) for h in TOP[1:]]
+        r, _ = self.machine.probe(*STOCK, "--probe-rod-only", "--corner", "--side-x-points", 3, prints=prints)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ref = self.saved()
+        self.assertEqual([round(h - BED, 3) for _, _, h in ref["top"]], [round(z - BED - REFMZ, 3) for z in TOP])
+        self.assertEqual([u for _, _, u in ref["faces"]["x"]], [63.6, 64.0, 64.3])
+
+    def test_top_only_keeps_the_sides(self):
+        widths = self.full()
+        r, _ = self.machine.probe(*STOCK, "--top-only", prints=[FENCE] + [h + 0.1 for h in TOP])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ref = self.saved()
+        self.assertEqual([u for _, _, u in ref["faces"]["x"]], list(widths), "kept from the full run")
+        self.assertAlmostEqual(ref["top"][0][2] - (TOP[0] - REFMZ), 0.1, places=3, msg="the new top")
+        self.assertIn("the sides kept from the probe run of", r.stdout)
+
+    def test_side_only_keeps_the_top_and_any_cut_since(self):
+        self.full()
+        self.machine.play(self.cut_job(h=BED + 28.5), [TOP[-1]])  # the top faced since
+        rod = TOP[0] - 0.4  # the rod touches the faced top beside the corner
+        prints = [rod] + [(round(X0 + w - WIDTH, 3), Y0, rod) for w in (63.5, 63.5, 63.5)] + [(X0, Y0, rod)] * 2
+        r, _ = self.machine.probe(*STOCK, "--side-only", "--side-x-points", 3, prints=prints)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ref = self.saved()
+        self.assertEqual({round(h - BED, 3) for _, _, h in ref["top"]}, {28.5}, "the faced top, not the probed one")
+        self.assertEqual([u for _, _, u in ref["faces"]["x"]], [63.5] * 3)
+        self.assertIn("The rod read the top beside the corner", r.stdout)
+        self.assertIn("the top kept from the probe run of", r.stdout)
+
+    def test_side_only_needs_a_saved_top(self):
+        rod = TOP[0]
+        r, _ = self.machine.probe(*STOCK, "--side-only", "--side-x-points", 1,
+                                  prints=[rod, (X0 - 1, Y0, rod), (X0, Y0, rod), (X0, Y0, rod)])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("Run a full probe job", r.stderr)
+
+    def test_partial_runs_refuse_when_the_stock_may_have_changed(self):
+        cases = {
+            "a job not written here": (lambda: self.machine.log(("play", "bracket.nc"), ("finish",)), [FENCE] + TOP, "may have cut"),
+            "X0 moved": (lambda: None, [(X0 + 0.5, Y0, FENCE)] + [(X0 + 0.5, Y0, h) for h in TOP], "+0.500, +0.000"),
+        }
+        for what, (between, prints, message) in cases.items():
+            with self.subTest(what):
+                self.machine = Machine(self.tmp)
+                self.full()
+                between()
+                r, _ = self.machine.probe(*STOCK, "--top-only", prints=prints)
+                self.assertEqual(r.returncode, 1)
+                self.assertIn(message, r.stderr)
+
+    # --- update ---
+
+    def update(self):
+        r = self.machine.run(PROBE_STOCK, "update", "--log", self.machine.logs)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    def test_update_writes_in_finished_jobs(self):
+        self.probed()
+        self.assertIn("stock.json is up to date", self.update().stdout)
+        self.machine.play(self.cut_job(), [TOP[-1]])
+        r = self.update()
+        self.assertIn("wrote in", r.stdout)
+        ref = self.saved()
+        self.assertEqual({round(h - BED, 3) for _, _, h in ref["top"]}, {28.5}, "the faced top is in stock.json now")
+        self.assertEqual(ref["anchor"]["name"], "face.nc")
+        self.assertEqual([text for _, text in self.state().history], ["face.nc: top faced"], "counted once")
+        self.assertIn("stock.json is up to date", self.update().stdout)
+
+    def test_update_stops_before_what_may_have_moved_z0(self):
+        self.probed()
+        self.machine.play(self.cut_job(), [TOP[-1]])
+        self.machine.log(("play", "bracket.nc"), ("finish",))
+        self.update()
+        self.assertEqual(self.saved()["anchor"]["name"], "face.nc", "written up to the last job written here")
+        with self.assertRaises(SystemExit) as e:
+            self.state().check("test")
+        self.assertIn("bracket.nc played", str(e.exception), "the next macro still stops on it")
+
+    def test_update_remembers_a_job_not_written_here(self):
+        self.full()
+        where = self.tmp / "probe-stock-where.nc"
+        self.machine.run(PROBE_STOCK, "where", "-o", where)
+        self.machine.log(("play", "bracket.nc"), ("finish",))
+        self.machine.play(where, [TOP[-1]])  # a print: Z0 is known again, but bracket.nc may have cut the stock
+        self.update()
+        r, _ = self.machine.probe(*STOCK, "--top-only", prints=[FENCE] + TOP)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("may have cut", r.stderr)
+
+    def test_update_saves_a_newer_probe_run(self):
+        self.probed()
+        self.machine.probe(*STOCK, prints=[FENCE, *(h - 0.2 for h in TOP)], save=False)
+        r = self.update()
+        self.assertIn("saved the probe run", r.stdout)
+        self.assertAlmostEqual(self.saved()["machine"]["z"], TOP[-1] - 0.2, places=3)
+
+    def test_update_skips_a_probe_run_that_stopped(self):
+        self.probed()
+        self.machine.play(self.cut_job(), [TOP[-1]])
+        self.job()
+        self.machine.play(self.tmp / "probe-stock.nc", [FENCE, *TOP[:3]], end=("raw", "Aborted by halt"))
+        r = self.update()
+        self.assertIn("didn't save the newer probe run", r.stdout)
+        self.assertEqual(self.saved()["anchor"]["name"], "face.nc", "the cut before it is still written in")
+
+    def test_update_without_stock_json_saves_the_probe_run(self):
+        self.machine.probe(*STOCK, prints=[FENCE, *TOP], save=False)
+        self.update()
+        self.assertTrue((self.tmp / "stock.json").exists())
+
     def test_show(self):
         self.probed()
         self.machine.play(self.cut_job(), [TOP[-1]])
