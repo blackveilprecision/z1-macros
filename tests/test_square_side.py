@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import REFMZ, ROOT, X0, Y0, Machine, levels, moves, plunges_over_stock
+from helpers import ORIGINS, REFMZ, ROOT, X0, Y0, Machine, levels, moves, plunges_over_stock
 
 SCRIPT = ROOT / "square-side" / "square-side.py"
 WIDTH, LENGTH, RADIUS = 65.4, 50.4, 6.35 / 2
@@ -21,6 +21,17 @@ STOCK = (
 SIDE = (63.63, 64.03, 64.33, 64.53, 64.77)  # the right side's width at each probed Y, like the real stock
 CUT = ("--tool-dia", 6.35, "--flute-length", 25.4, "--pass-depth", 0.2, "--stepover", 4, "--finish-allowance", 0.2,
        "--feed", 500, "--plunge-feed", 200, "--rpm", 12000, "--clamp-height", 10, "--round-to", 0.5, "--overlap", 1)
+CORNERS = [o for o in ORIGINS if o != "topCenter"]
+
+
+def tool(description, lcf):
+    """A made-up tool library entry: a 6.35 mm flat end mill with flutes lcf long."""
+    return {
+        "type": "flat end mill", "unit": "millimeters", "description": description, "product-id": "",
+        "geometry": {"DC": 6.35, "SFDM": 6.35, "NOF": 3, "LCF": lcf, "OAL": 63.5},
+        "start-values": {"presets": [{"name": "Aluminum", "n": 12000, "v_f": 500, "v_f_plunge": 200, "stepdown": 0.2,
+                                      "use-stepdown": True}]},
+    }
 
 
 def z(thickness):
@@ -46,11 +57,11 @@ class SquareSide(unittest.TestCase):
                                   *args, prints=prints)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def generate(self, *args, ok=True):
+    def generate(self, *args, ok=True, cut=CUT):
         out = self.tmp / "side.nc"
         if out.exists():
             out.unlink()
-        r = self.machine.run(SCRIPT, "--log", self.machine.logs, "-o", out, *CUT, *args)
+        r = self.machine.run(SCRIPT, "--log", self.machine.logs, "-o", out, *cut, *args)
         if ok:
             self.assertEqual(r.returncode, 0, r.stderr)
             return r, out.read_text()
@@ -70,19 +81,38 @@ class SquareSide(unittest.TestCase):
         for banned in ("G38", "G10", "T0"):
             self.assertNotIn(banned, program, "it doesn't probe or move Z0")
 
+    def each_corner(self):
+        """Each corner origin, on its own made-up machine, probed."""
+        for origin in CORNERS:
+            with self.subTest(origin):
+                self.tmp = self.tmp.parent / f"{self.tmp.name}-{origin}"
+                self.tmp.mkdir()
+                self.addCleanup(shutil.rmtree, self.tmp)
+                self.machine = Machine(self.tmp)
+                self.probe(origin=origin)
+                yield origin, self.generate()[1]
+
     def test_every_pass_starts_and_ends_beyond_the_stock(self):
-        self.probe()
-        _, program = self.generate()
-        self.assertEqual(plunges_over_stock(program, "topFrontLeft", WIDTH, LENGTH, RADIUS, top=1e9), [])
-        ys = {round(y, 3) for code, _, y, _, _ in moves(program) if code == "G1" and y is not None}
-        self.assertEqual(ys, {round(-RADIUS - 2, 3), round(LENGTH + RADIUS + 2, 3)})
+        for origin, program in self.each_corner():
+            self.assertEqual(plunges_over_stock(program, origin, WIDTH, LENGTH, RADIUS, top=1e9), [])
+            ys = {round(y, 3) for code, _, y, _, _ in moves(program) if code == "G1" and y is not None}
+            front = -LENGTH if "Back" in origin else 0
+            self.assertEqual(ys, {round(front - RADIUS - 2, 3), round(front + LENGTH + RADIUS + 2, 3)})
+
+    def test_the_far_side_from_each_corner(self):
+        for origin, program in self.each_corner():
+            sign = -1 if "Right" in origin else 1
+            xs = {x for code, x, _, _, _ in moves(program) if code == "G1" and x is not None}
+            self.assertEqual(xs, {sign * (63.5 + 0.2 + RADIUS), sign * (63.5 + RADIUS)})
 
     def test_the_finishing_pass_climbs(self):
-        self.probe()
-        _, program = self.generate()
-        finish = program[program.index("; Finishing pass"):]
-        y_moves = [y for code, _, y, _, _ in moves(finish) if code == "G1" and y is not None]
-        self.assertGreater(y_moves[-1], y_moves[0], "with the side to its left, a clockwise cutter climbs along +Y")
+        for origin, program in self.each_corner():
+            finish = program[program.index("; Finishing pass"):]
+            y_moves = [y for code, _, y, _, _ in moves(finish) if code == "G1" and y is not None]
+            if "Left" in origin:
+                self.assertGreater(y_moves[-1], y_moves[0], "with the side to its left, a clockwise cutter climbs along +Y")
+            else:
+                self.assertLess(y_moves[-1], y_moves[0], "with the side to its right, it climbs along -Y")
 
     def test_more_than_one_roughing_pass_when_the_side_is_far_out(self):
         self.probe()
@@ -98,15 +128,6 @@ class SquareSide(unittest.TestCase):
         r, program = self.generate("--final-width", 63)
         self.assertIn(f"G1 Y{LENGTH + RADIUS + 2:g}", program)
         self.assertIn("X66.175", program)
-
-    def test_the_left_side_for_a_right_origin(self):
-        self.probe(origin="topFrontRight")
-        _, program = self.generate()
-        xs = {x for code, x, _, _, _ in moves(program) if code == "G1" and x is not None}
-        self.assertEqual(xs, {-(63.5 + 0.2 + RADIUS), -(63.5 + RADIUS)})
-        finish = program[program.index("; Finishing pass"):]
-        y_moves = [y for code, _, y, _, _ in moves(finish) if code == "G1" and y is not None]
-        self.assertLess(y_moves[-1], y_moves[0], "with the side to its right, it climbs along -Y")
 
     def test_refuses_what_it_cant_cut_safely(self):
         cases = {
@@ -162,6 +183,31 @@ class SquareSide(unittest.TestCase):
         r, _ = self.generate(ok=False)
         self.assertEqual(r.returncode, 1)
         self.assertIn("--side-x-points", r.stderr)
+
+    def test_needs_a_corner_origin(self):
+        r, _ = self.machine.probe(*STOCK, "--origin", "topCenter", prints=[z(5)] + [z(29.0)] * 20)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r, _ = self.generate(ok=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("needs a corner origin", r.stderr)
+
+    def test_tool(self):
+        tools = self.tmp / "tools"
+        tools.mkdir()
+        (tools / "tools.json").write_text(json.dumps({"data": [tool("Long 1/4", 30), tool("Short 1/4", 12)]}))
+        self.machine.env["Z1_TOOLS"] = str(tools)
+        self.probe()
+        r, program = self.generate("--tool", "Long", cut=())
+        self.assertIn("30 mm flutes", r.stdout)
+        self.assertIn("|flutelength=30|", program)
+        for args in (("--tool", "Short"), ("--tool", "Long", "--flute-length=12"), ("--tool", "Long", "--flute-length", 12)):
+            with self.subTest(args):
+                r, _ = self.generate(*args, ok=False, cut=())
+                self.assertEqual(r.returncode, 1)
+                self.assertIn("more than the 12 mm flutes allow", r.stderr)
+        r, program = self.generate("--tool", "Short", "--flute-length=20", cut=())
+        self.assertIn("20 mm flutes", r.stdout, "a flute length you give wins over the tool's")
+        self.assertIn("|flutelength=20|", program)
 
     def test_once_it_has_run_the_side_counts_as_cut(self):
         self.probe()

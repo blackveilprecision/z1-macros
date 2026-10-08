@@ -1,5 +1,7 @@
 """probe-stock and its stock reference against made-up Studio logs (the real one is never read)."""
 
+import importlib.util
+import io
 import json
 import os
 import re
@@ -7,7 +9,9 @@ import shutil
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from helpers import PROBE_STOCK, REFMZ, ROOT, X0, Y0, Machine, moves
 
@@ -130,17 +134,45 @@ class ProbeStock(unittest.TestCase):
 
     def test_refuses_what_it_cant_touch_safely(self):
         bad = {
-            "below the clamps": ("--side-x-points", 2, "--side-depth", 19),
-            "no corner to put X0 back on": ("--side-x-points", 2, "--origin", "topCenter"),
-            "deeper than the stock": ("--side-y-points", 1, "--side-depth", 30, "--clamp-height", 0),
-            "no top point": ("--probe-grid-x", 0),
-            "the rod as the probe's tool": ("--side-x-points", 2, "--rod-tool", 0),
+            "below the clamps": (("--side-x-points", 2, "--side-depth", 19), "beside the right side, not 1 mm above the 10 mm clamps"),
+            "no corner to put X0 back on": (("--side-x-points", 2, "--origin", "topCenter"), "corner origin"),
+            "deeper than the stock": (("--side-y-points", 1, "--side-depth", 30, "--clamp-height", 0), "less than stock_height"),
+            "no top point": (("--probe-grid-x", 0), "at least 1"),
+            "the rod as the probe's tool": (("--side-x-points", 2, "--rod-tool", 0), "T0, the probe"),
+            "the corner beside the clamps": (("--corner", "--stock-height", 8, "--no-fence", "--origin", "topBackRight"),
+                                             "the corner touch 2 mm down puts the rod tip 6 mm above the bed beside the right side"),
+            "deep beside the anchor plate": (("--origin", "topFrontRight", "--side-x-points", 1, "--side-depth", 25, "--clamp-height", 0),
+                                             "beside the left side, not 1 mm above the 5 mm anchor plate"),
+            "deep beside the plate it doesn't touch": (("--origin", "topBackLeft", "--no-fence", "--side-y-points", 1, "--side-depth", 25),
+                                                       "beside the front, not 1 mm above the 5 mm anchor plate"),
+            "the corner below the bed": (("--corner", "--stock-height", 1.5, "--no-fence"), "stock_height must be more than 2"),
+            "a search past 10 mm": (("--side-y-points", 1, "--side-clearance", 8), "side_clearance can't be more than 5"),
         }
-        for what, args in bad.items():
+        for what, (args, message) in bad.items():
             with self.subTest(what):
                 r = self.job(*args, ok=False)
                 self.assertEqual(r.returncode, 1)
-                self.assertIn("probe-stock:", r.stderr)
+                self.assertIn(message, r.stderr)
+
+    def test_options_have_to_be_spelled_out(self):
+        r = self.job("--side-x", 2, ok=False)  # not --side-x-points: the rod beside the stock
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("unrecognized arguments: --side-x", r.stderr)
+        r = self.machine.run(PROBE_STOCK, "save", "--lo", self.machine.logs)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("unrecognized arguments: --lo", r.stderr)
+
+    def test_checks_only_what_is_beside_each_touch(self):
+        self.job("--stock-height", 1.5)  # the top only: side_depth isn't used
+        self.job("--corner", "--stock-height", 8)  # the corner is by the anchor plate, not the clamps
+        self.job("--origin", "topBackRight", "--side-x-points", 1, "--side-depth", 20)  # the left side, clear of the 5 mm plate
+
+    def test_a_top_only_job_is_never_the_full_one(self):
+        self.job()
+        top = self.job("--top-only")
+        self.assertIn("; --top-only: save keeps the saved side touches.", top)
+        jobs = json.loads((self.tmp / "jobs.json").read_text())
+        self.assertEqual([e["plan"]["only"] for e in jobs], [None, "top"], "the same file would share an MD5 and one plan")
 
     # --- save ---
 
@@ -272,10 +304,22 @@ class ProbeStock(unittest.TestCase):
         where = self.tmp / "probe-stock-where.nc"
         r = self.machine.run(PROBE_STOCK, "where", "-o", where)
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(where.read_text().endswith("M498\nG28\nM02\n"), "ends with G28, so the log shows it finished")
         self.machine.play(where, [moved])
         state = self.state()
         state.check("test")
         self.assertAlmostEqual(state.z0 - BED, 29.01 + 1.234, places=3)
+        self.update()
+        self.assertEqual(self.saved()["anchor"]["name"], "probe-stock-where.nc", "update writes stock.json up to it")
+
+    def test_a_missing_log_says_so(self):
+        self.probed()
+        (self.tmp / "empty").mkdir()
+        for log in (self.tmp / "nowhere", self.tmp / "empty"):
+            with self.subTest(log.name):
+                r = self.machine.run(PROBE_STOCK, "show", "--log", log)
+                self.assertEqual(r.returncode, 1)
+                self.assertIn(f"no Studio log (log_*.txt) at {log}", r.stderr)
 
     def test_a_newer_probe_run_has_to_be_saved(self):
         self.probed()
@@ -359,6 +403,31 @@ class ProbeStock(unittest.TestCase):
         self.assertIn("The rod read the top beside the corner", r.stdout)
         self.assertIn("the top kept from the probe run of", r.stdout)
 
+    def test_side_only_refuses_a_top_the_rod_reads_elsewhere(self):
+        self.full()
+        before = self.saved()
+        rod = TOP[0] + 0.5  # the stock put back against the plate on a chip
+        prints = [rod] + [(round(X0 + w - WIDTH, 3), Y0, rod) for w in (63.6, 64.0, 64.3)] + [(X0, Y0, rod)] * 2
+        r, _ = self.machine.probe(*STOCK, "--side-only", "--side-x-points", 3, prints=prints)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("+0.500 mm from the saved top there", r.stderr)
+        self.assertEqual(self.saved(), before)
+
+    def test_a_probe_job_under_another_name_is_saved(self):
+        self.full()
+        top = self.tmp / "probe-stock-top.nc"
+        r = self.machine.run(PROBE_STOCK, "job", *STOCK, "--top-only", "-o", top)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.machine.play(top, [FENCE] + [h - 0.3 for h in TOP])
+        with self.assertRaises(SystemExit) as e:
+            self.state().check("test")
+        self.assertIn("probe-stock-top.nc probed again at", str(e.exception))
+        self.save()
+        ref = self.saved()
+        self.assertEqual(ref["probe"]["name"], "probe-stock-top.nc")
+        self.assertAlmostEqual(ref["top"][0][2] - (TOP[0] - REFMZ), -0.3, places=3, msg="the new top")
+        self.state().check("test")
+
     def test_side_only_needs_a_saved_top(self):
         rod = TOP[0]
         r, _ = self.machine.probe(*STOCK, "--side-only", "--side-x-points", 1,
@@ -426,6 +495,17 @@ class ProbeStock(unittest.TestCase):
         r = self.update()
         self.assertIn("saved the probe run", r.stdout)
         self.assertAlmostEqual(self.saved()["machine"]["z"], TOP[-1] - 0.2, places=3)
+
+    def test_update_reads_the_log_once(self):
+        self.full()
+        self.machine.probe(*STOCK, "--top-only", prints=[FENCE] + TOP, save=False)  # merged: the most reads
+        spec = importlib.util.spec_from_file_location("probe_stock", PROBE_STOCK)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with mock.patch.object(stockref, "read_logs", wraps=stockref.read_logs) as read, redirect_stdout(io.StringIO()) as out:
+            module.update(self.machine.logs)
+        self.assertEqual(read.call_count, 1)
+        self.assertIn("saved the probe run", out.getvalue())
 
     def test_update_skips_a_probe_run_that_stopped(self):
         self.probed()

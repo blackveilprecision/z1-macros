@@ -1,6 +1,6 @@
 # Tool library
 
-Cutting tools the macros can use by name. Run a facing macro with `--tool` and it takes the cutter's diameter and its feeds and speeds from here instead of its defaults:
+Cutting tools the macros can use by name. Run a cutting macro with `--tool` and it takes the cutter's diameter and its feeds and speeds from here instead of its defaults:
 
 ```sh
 ./surface-to-lowest-point/surface-to-lowest-point.py --tool 'WEXWE 1/4"' --material Aluminum
@@ -9,7 +9,7 @@ Cutting tools the macros can use by name. Run a facing macro with `--tool` and i
 Tools are Fusion tool library files, the same files Fusion imports, so one definition serves both CAM and the macros. They come from, in this order:
 
 1. **`custom/`**: our own tools, one Fusion library file (`.json`) each. [amazon-tool](../amazon-tool) writes here.
-2. **Makera's tool files**, from [MakeraInc/CarveraProfiles](https://github.com/MakeraInc/CarveraProfiles/tree/main/CAM_Post_Processors/Fusion360-profiles/Tool%20Files) at the commit in `makera.json`. They're downloaded into `cache/` the first time a script needs them. Makera's repo has no license, so the files aren't copied into this one.
+2. **Makera's tool files**, from [MakeraInc/CarveraProfiles](https://github.com/MakeraInc/CarveraProfiles/tree/main/CAM_Post_Processors/Fusion360-profiles/Tool%20Files) at the commit in `makera.json`. They're downloaded into `cache/` the first time a script needs them, and again when `makera.json` names another commit (`cache/COMMIT` says which one they're from). Makera's repo has no license, so the files aren't copied into this one.
 3. **Fusion's local tool libraries** on this computer (`~/Library/Application Support/Autodesk/CAM360/libraries/Local` on macOS), if Fusion is installed.
 
 When two tools have the same description, the first one found wins, so a tool in `custom/` replaces a Makera tool of the same name.
@@ -25,14 +25,14 @@ When two tools have the same description, the first one found wins, so a tool in
 
 A name matches a tool's description or product id exactly, or any part of its description; it has to pick out one tool.
 
-In surface-stock, face-to-thickness and surface-to-lowest-point:
+In surface-stock, face-to-thickness, surface-to-lowest-point and square-side:
 
 | Option | Meaning |
 |---|---|
-| `--tool NAME` | Take `tool_dia`, `rpm`, `feed`, `plunge_feed`, `pass_depth` (the preset's stepdown) and `stepover` from this tool |
+| `--tool NAME` | Take `tool_dia`, `rpm`, `feed`, `plunge_feed`, `pass_depth` (the preset's stepdown) and `stepover` from this tool; square-side also takes `flute_length`. It has to be a flat end mill |
 | `--material NAME` | Which of the tool's presets to use (default `Aluminum`). Fusion's are named by material: Aluminum, Brass, Copper, Hardwood, Softwood, Plastic, Carbon Fiber, PCB |
 
-Options you pass on the command line still win: `--tool 'WEXWE 1/4"' --feed 600` uses the tool's other settings and a 600 mm/min feed. Fusion presets carry no facing stepover, so `stepover` is set to 63% of the diameter, Makera's 2.0 mm on a 3.175 mm cutter. The macros only load this library with `--tool`; without it they run on their own.
+Options you pass on the command line still win: `--tool 'WEXWE 1/4"' --feed 600` uses the tool's other settings and a 600 mm/min feed. Spell them out: the macros don't take abbreviations such as `--pass` for `--pass-depth`. Fusion presets carry no facing stepover, so `stepover` is set to 63% of the diameter, Makera's 2.0 mm on a 3.175 mm cutter, or of `--tool-dia` if you pass one. Ball, chamfer, drill and other tools stop the macro: every macro cuts with the flat end and side of the cutter. The macros only load this library with `--tool` (`apply_tool()` in [shared/cli.py](../shared/cli.py)); without it they don't need it.
 
 In another script:
 
@@ -42,7 +42,7 @@ import toollib
 
 tool = toollib.find('WEXWE 1/4"')          # .dia, .shank, .flutes, .flute_length, .overall_length, .type
 cut = tool.preset("Aluminum")              # .rpm, .feed, .plunge_feed (mm/min), .stepdown (mm)
-toollib.apply(v, 'WEXWE 1/4"', "Aluminum")   # fills a macro's settings dict, as --tool does
+toollib.apply(v, tool, "Aluminum", given={"feed"})   # fills a macro's settings dict but its feed, as --tool does
 ```
 
 ## Adding a tool

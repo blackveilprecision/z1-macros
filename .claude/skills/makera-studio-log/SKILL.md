@@ -1,6 +1,6 @@
 ---
 name: makera-studio-log
-description: Find and read Makera Studio's log files (log_*.txt) to see what a Makera Z1 or Z1 Pro did during a job or by hand, and pull values out of a run - M498 Z0 (G54) offsets, probe results, tool lengths, tool changes, alarms, pauses and aborts. Use it whenever the user asks what happened on the machine, why a job stopped or alarmed, which version of a file ran, or wants numbers from a probe run, and whenever code has to parse Studio's log (like last_probe_run() in surface-to-lowest-point), even if they don't say "log".
+description: Find and read Makera Studio's log files (log_*.txt) to see what a Makera Z1 or Z1 Pro did during a job or by hand, and pull values out of a run - M498 Z0 (G54) offsets, probe results, tool lengths, tool changes, alarms, pauses and aborts. Use it whenever the user asks what happened on the machine, why a job stopped or alarmed, which version of a file ran, or wants numbers from a probe run, and whenever code has to parse Studio's log (like read_logs() in probe-stock/stockref.py), even if they don't say "log".
 ---
 
 # Makera Studio's log
@@ -127,7 +127,7 @@ for run in runs(sorted(LOGS.glob("log_*.txt"))):
 
 It reads the files in date order, so a run that crosses midnight stays whole. Print `run["msgs"]` to read one run in full. Filter on `run["file"].endswith("/name.nc")` to pick a job. `z0` holds the G54 Z after each `M498`; differences between entries are height differences (higher surface, less negative).
 
-`read_logs()` in `probe-stock/stockref.py` is the repo's working parser: it reads every log in date order and returns each file played, with its upload MD5, every `M498` (G54 and REFMZ) and Studio-sent `G10`/`G92` logged until the next `Playing file:`, and whether it reached its final `G28` or stopped (`Aborted`, `ALARM:`, `Soft Endstop`). A run that crosses midnight stays whole. Its tests build fake logs in the same format (`studio_log()` and `Machine` in `tests/helpers.py`).
+`read_logs()` in `probe-stock/stockref.py` is the repo's working parser: it reads every log in date order and returns each file played, with its upload MD5, every `M498` (G54 and REFMZ) and Studio-sent `G10`/`G92` logged until the next `Playing file:`, and whether it reached its final `G28` or stopped (`Aborted`, `ALARM:`, `Soft Endstop`, `System reset completed`). A run that crosses midnight stays whole, and a path with no `log_*.txt` stops it with a message rather than reading as no runs. Its tests build fake logs in the same format (`studio_log()` and `Machine` in `tests/helpers.py`).
 
 ## Quoting the log in an issue, commit or PR
 

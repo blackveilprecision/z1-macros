@@ -4,9 +4,13 @@
 1. `probe-stock.py job` writes probe-stock.nc. On metal stock it can start with
    the probe rod (T9999): the stock's sides and its corner, for its size and
    X0/Y0. Then the probe (T0) touches the anchor plate (for the bed's height)
-   and a grid on the top. Each touch sets Z0, X0 or Y0 there and M498 prints it
-   to Studio's log. No spindle, no cutting.
-2. `probe-stock.py save` reads that run back from Studio's log into stock.json.
+   and a grid on the top. --top-only leaves out the rod and --side-only the
+   probe; with --probe-rod-only the rod does it all. Each touch sets Z0, X0 or Y0
+   there and M498 prints it to Studio's log. No spindle, no cutting.
+2. `probe-stock.py save` reads that run back from Studio's log into stock.json;
+   a --top-only or --side-only run keeps the rest from the saved one.
+   `probe-stock.py update` saves a newer run too, and writes every job that
+   finished since into stock.json.
 3. Macros such as surface-to-lowest-point write their jobs from stock.json, and
    note what each one will change. Once Studio's log shows a job finished, the
    change counts: `probe-stock.py show` prints the stock as it is now.
@@ -17,24 +21,25 @@ first (or touch the corner here with --corner), and start every job with Auto
 leveling OFF.
 
 Edit VARIABLES below (or pass flags, see `probe-stock.py job --help`) and upload
-each .nc to the Z1 from Makera Studio under its own name.
+each .nc to the Z1 from Makera Studio.
 """
 
-import argparse
 import json
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+sys.path[:0] = [str(HERE.parent), str(HERE)]
+from shared import cli, toolpath, z1  # noqa: E402
+from shared.z1 import fmt  # noqa: E402
 import stockref  # noqa: E402
-from stockref import ORIGINS, PROBE_JOB, WHERE_JOB, fmt  # noqa: E402
+from stockref import PROBE_JOB, WHERE_JOB  # noqa: E402
 
 # --- VARIABLES (dimensions are POSITIVE values) ---
 VARIABLES = {
     "stock_width": 65.4,     # X-axis dimension of stock (the widest, if a side is uneven)
     "stock_length": 50.4,    # Y-axis dimension of stock
-    "stock_height": 29.0,    # Thickness, roughly: checks the anchor plate reading, and sets the side touches' depth
+    "stock_height": 29.0,    # Thickness, roughly: checks the anchor plate reading, and keeps the rod above the clamps and the plate
     "origin": "topFrontLeft",  # Studio origin corner: front-left, where the stock's square edges are
     "fence_x": -7.5,         # A point on the anchor plate's top, in job coordinates (from the origin corner):
     "fence_y": 77.0,         #   left arm, between a screw hole and the dowel. --no-fence to skip it
@@ -46,15 +51,12 @@ VARIABLES = {
     "side_x_points": 0,      # Points on the X side across from the origin (the right side for a left origin), rod only
     "side_y_points": 0,      # Points on the Y side across from the origin (the back for a front origin), rod only
     "side_depth": 2.0,       # Rod tip this far below the top for those; it touches the side wherever it sticks out most above
-    "side_clearance": 5.0,   # Rod comes down this far outside a side across from the origin, then searches up to twice that
+    "side_clearance": 5.0,   # Rod comes down this far outside a side across from the origin, then searches up to twice that; at most 5
     "rod_dia": 2.0,          # The probe rod's diameter where it touches (Studio's corner probe sets X/Y 1 mm from the touch)
-    "rod_tool": 9999,        # The probe rod's tool number (Studio's 3D probe); not the probe's 0, so the job can ask for the swap
+    "rod_tool": 9999,        # The probe rod's tool number; not the probe's T0, so the job can ask for the swap
     "clamp_height": 10.0,    # Tallest clamp beside the sides (0 = none): side touches stay above it
 }
 
-SAFE_Z = 15.0        # Retract height, same as Studio's exports
-PROBE_FEED = 300     # Grid probing feed, and the rod's way down beside a side (Studio probes Z at 500 fast / 100 slow)
-SLOW_TOUCH = 100     # Every Z touch ends with this, as Studio's Z probe does
 SIDE_FAST = 100      # Studio's corner probe: fast touch, back off, slow touch
 SIDE_SLOW = 50
 BACK_OFF = 1.0
@@ -62,6 +64,9 @@ CORNER_DEPTH = 2.0   # Studio's corner probe: from the top touch, out CORNER_OUT
 CORNER_OUT = 10.0
 CLEARANCE = 1.0      # Rod tip at least this far above a clamp or the anchor plate
 FENCE_CHECK = 2.0    # A thickness from the anchor plate this far from stock_height means the probe missed the plate
+TOP_MOVED = 0.2      # A --side-only rod reading the saved top this far off: the stock sits higher or lower. The rod and
+                     # the probe read the same point 0.03 mm apart on the machine
+PLATE_SIDES = ("left side", "front")  # beside Makera's anchor plate, front-left; the clamps are on the right and back
 
 PROBE_TOOL = 0       # The probe. A tool change to the tool already in does nothing, so the rod needs another number
 SPECIAL = {PROBE_TOOL: "the probe", 8888: "the laser"}  # tool numbers the rod can't take
@@ -70,15 +75,10 @@ NAMES = {("x", 0.0): "right side", ("x", 1.0): "left side", ("y", 0.0): "back", 
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p = cli.parser(__doc__)
     sub = p.add_subparsers(dest="command", required=True)
-    job = sub.add_parser("job", help=f"write the probe job, {PROBE_JOB}")
-    for name, default in VARIABLES.items():
-        flag = "--" + name.replace("_", "-")
-        if name == "origin":
-            job.add_argument(flag, default=default, choices=ORIGINS)
-        else:
-            job.add_argument(flag, type=type(default), default=default)
+    job = sub.add_parser("job", help=f"write the probe job, {PROBE_JOB}", allow_abbrev=False)  # not inherited
+    cli.add_variables(job, VARIABLES, {"origin": z1.ORIGINS})
     job.add_argument("--no-fence", action="store_true", help="don't touch the anchor plate; the highest point is taken to be --stock-height thick")
     job.add_argument("--corner", action="store_true", help="touch the origin corner's two sides with the rod and set X0/Y0 there, as Studio's corner probe does")
     part = job.add_mutually_exclusive_group()
@@ -90,19 +90,17 @@ def parse_args():
                        ("update", "bring stock.json up to date: save a newer probe run, and write in every job that finished"),
                        ("show", "print the stock as it is now"),
                        ("where", f"write {WHERE_JOB}, which only prints X0/Y0/Z0 to Studio's log")):
-        s = sub.add_parser(name, help=text)
+        s = sub.add_parser(name, help=text, allow_abbrev=False)
         if name == "where":
             s.add_argument("-o", "--out", type=Path)
         else:
-            s.add_argument("--log", type=Path, default=stockref.STUDIO_LOGS, help="Studio's log folder or one log file (default: %(default)s)")
+            cli.add_log(s)
     return p.parse_args()
 
 
-def check(v, fenced, corner, rod_only=False):
-    errors = []
-    for name in ("stock_width", "stock_length", "stock_height", "probe_clearance", "side_depth", "side_clearance", "rod_dia", "fence_height"):
-        if v[name] <= 0:
-            errors.append(f"{name} must be positive")
+def check(v, corner, rod_only=False):
+    errors = cli.positive(v, ("stock_width", "stock_length", "stock_height", "probe_clearance", "side_depth", "side_clearance",
+                              "rod_dia", "fence_height"))
     if v["probe_inset"] < 0 or v["clamp_height"] < 0:
         errors.append("probe_inset and clamp_height can't be negative")
     if min(v["probe_grid_x"], v["probe_grid_y"]) < 1:
@@ -112,56 +110,36 @@ def check(v, fenced, corner, rod_only=False):
     sides = v["side_x_points"] or v["side_y_points"]
     if (sides or corner) and v["origin"] == "topCenter":
         errors.append("touching the sides needs a corner origin: X0/Y0 are set back on the origin's sides afterwards")
-    if sides and v["clamp_height"] and v["stock_height"] - v["side_depth"] < v["clamp_height"] + CLEARANCE:
-        errors.append(
-            f"side_depth {fmt(v['side_depth'])} puts the rod tip {fmt(v['stock_height'] - v['side_depth'])} mm above the bed,"
-            f" not {fmt(CLEARANCE)} mm above the {fmt(v['clamp_height'])} mm clamps it comes down beside"
-        )
-    if v["side_depth"] >= v["stock_height"]:
+    elif sides or corner:  # each touch against what sits beside the side it touches; --no-fence leaves the plate there
+        for axis, count in (("x", v["side_x_points"]), ("y", v["side_y_points"])):
+            o = z1.ORIGINS[v["origin"]][axis == "y"]
+            for side, depth, cause, touched in (
+                (NAMES[(axis, o)], v["side_depth"], f"side_depth {fmt(v['side_depth'])}", count),
+                (NAMES[(axis, 1.0 - o)], CORNER_DEPTH, f"the corner touch {fmt(CORNER_DEPTH)} mm down", count or corner),
+            ):
+                below, what = (v["fence_height"], "anchor plate") if side in PLATE_SIDES else (v["clamp_height"], "clamps")
+                tip = v["stock_height"] - depth
+                if touched and below and tip < below + CLEARANCE:
+                    errors.append(f"{cause} puts the rod tip {fmt(tip)} mm above the bed beside the {side},"
+                                  f" not {fmt(CLEARANCE)} mm above the {fmt(below)} mm {what} there")
+    if sides and v["side_depth"] >= v["stock_height"]:
         errors.append("side_depth must be less than stock_height")
-    if (sides or corner) and fenced and v["stock_height"] - CORNER_DEPTH < v["fence_height"] + CLEARANCE:
-        errors.append("the stock is too thin to touch its sides above the anchor plate")
+    if (sides or corner) and v["stock_height"] <= CORNER_DEPTH:
+        errors.append(f"stock_height must be more than {fmt(CORNER_DEPTH)}: the corner touches go that far down")
+    if sides and v["side_clearance"] > CORNER_OUT / 2:
+        errors.append(f"side_clearance can't be more than {fmt(CORNER_OUT / 2)}: the rod searches twice that, and the"
+                      f" searches are kept within the corner touches' {fmt(CORNER_OUT)} mm (see the README)")
     if (sides or corner or rod_only) and (v["rod_tool"] in SPECIAL or v["rod_tool"] < 0):
         errors.append(f"rod_tool can't be T{v['rod_tool']}, {SPECIAL.get(v['rod_tool'], 'no tool')}")
-    if errors:
-        raise SystemExit("probe-stock: " + "; ".join(errors))
+    cli.stop("probe-stock", errors)
 
 
-def spread(size, count, inset):
-    if count == 1 or size <= 2 * inset:
-        return [size / 2]
-    return [inset + (size - 2 * inset) * i / (count - 1) for i in range(count)]
-
-
-def grid(v):
-    """(u, t) points on the top, stock coordinates, serpentine from the corner nearest the origin."""
-    ox, oy = ORIGINS[v["origin"]]
-    us = spread(v["stock_width"], v["probe_grid_x"], v["probe_inset"])
-    ts = spread(v["stock_length"], v["probe_grid_y"], v["probe_inset"])
-    us, ts = (us[::-1] if ox > 0.5 else us), (ts[::-1] if oy > 0.5 else ts)
-    return [(u, t) for j, t in enumerate(ts) for u in (us if j % 2 == 0 else us[::-1])]
-
-
-def program(v, u, t):
-    ox, oy = ORIGINS[v["origin"]]
-    return u - ox * v["stock_width"], t - oy * v["stock_length"]
-
-
-def studio_probe(x, y, fast=500):
-    """Touch a point the way Studio's own Z probe does, from the top of Z travel, and set Z0 there.
+def studio_probe(x, y, fast=z1.PROBE_FAST):
+    """Touch a point the way Studio's own Z probe does, and print G54 to Studio's log.
 
     Studio comes down at 500 mm/min with the probe; the rod is rigid, and its corner probe takes it down at 100.
     """
-    return [
-        "G53 G0 Z-3",
-        f"G90 G0 X{fmt(x)} Y{fmt(y)}",
-        f"G91 G38.2 Z-108 F{fast}",
-        "G91 G0 Z1",
-        f"G38.2 Z-2 F{SLOW_TOUCH}",
-        "G10 L20 P0 Z0",
-        "G90",
-        "M498 ; print G54 to Studio's log",
-    ]
+    return [*z1.z_probe(x, y, fast, g91=True), "M498 ; print G54 to Studio's log"]
 
 
 def side_touch(v, axis, face, out, cross, depth, gap):
@@ -179,7 +157,7 @@ def side_touch(v, axis, face, out, cross, depth, gap):
     return [
         f"G0 Z{fmt(c)}",
         f"G0 {xy}",
-        f"G1 Z{fmt(-depth)} F{PROBE_FEED}",
+        f"G1 Z{fmt(-depth)} F{z1.PROBE_FEED}",
         f"G91 G38.2 {axis}{fmt(-out * 2 * gap)} F{SIDE_FAST}",
         f"G91 G0 {axis}{fmt(out * BACK_OFF)}",
         f"G38.2 {axis}{fmt(-out * 2 * gap)} F{SIDE_SLOW}",
@@ -196,7 +174,7 @@ def top_touch(v, x, y, search):
     c = v["probe_clearance"]
     return [
         f"G0 Z{fmt(c)}", f"G0 X{fmt(x)} Y{fmt(y)}", f"G91 G38.2 Z-{fmt(2 * c)} F{search}",
-        f"G91 G0 Z{fmt(BACK_OFF)}", f"G38.2 Z-{fmt(2 * BACK_OFF)} F{SLOW_TOUCH}", "G10 L20 P0 Z0", "G90", "M498",
+        f"G91 G0 Z{fmt(BACK_OFF)}", f"G38.2 Z-{fmt(2 * BACK_OFF)} F{z1.PROBE_SLOW}", "G10 L20 P0 Z0", "G90", "M498",
     ]
 
 
@@ -226,9 +204,10 @@ def probe_job(v, fenced, corner, only=None, rod_only=False):
     wrong value. Each G10 is one write to the machine's EEPROM, as with Studio's
     own probes.
     """
-    ox, oy = ORIGINS[v["origin"]]
+    ox, oy = z1.ORIGINS[v["origin"]]
     touches, lines = [], []
-    pts = grid(v)
+    pts = toolpath.probe_grid(v["origin"], v["stock_width"], v["stock_length"], v["probe_grid_x"], v["probe_grid_y"], v["probe_inset"])
+    xy = z1.to_program(v["origin"], v["stock_width"], v["stock_length"], pts)  # the same points in the job's coordinates
     sides = (v["side_x_points"] or v["side_y_points"] or corner) and only != "top"
     tops = only != "sides"
     plate = fenced and tops
@@ -244,7 +223,7 @@ def probe_job(v, fenced, corner, only=None, rod_only=False):
             if count:
                 far = -near_out * size
                 out.append(f"; The {NAMES[(axis, o)]}, {fmt(v['side_depth'])} mm down")
-                for s in spread(across, count, v["probe_inset"]):
+                for s in toolpath.spread(across, count, v["probe_inset"]):
                     out.extend(side_touch(v, axis.upper(), far, -near_out, s - cross_origin, v["side_depth"], v["side_clearance"]))
                     touches.append({"kind": "side", "axis": axis, "at": s, "depth": v["side_depth"], "face": far})
             near = NAMES[(axis, 1.0 - o)]
@@ -261,29 +240,29 @@ def probe_job(v, fenced, corner, only=None, rod_only=False):
         if plate:
             touches.append({"kind": "fence"})
             lines += ["; The anchor plate's top, fence_height above the bed", *studio_probe(v["fence_x"], v["fence_y"], fast=SIDE_FAST)]
-        lines += ["; The top beside the corner: Z0 for the side touches' depth", *studio_probe(*program(v, *pts[0]), fast=SIDE_FAST)]
+        lines += ["; The top beside the corner: Z0 for the side touches' depth", *studio_probe(*xy[0], fast=SIDE_FAST)]
         touches.append({"kind": "top" if tops else "rod_top", "u": pts[0][0], "t": pts[0][1]})
         if sides:
             lines += side_and_corner_touches()
         if tops:
             lines.append("; The rest of the top")
-            for u, t in pts[1:]:
-                lines += top_touch(v, *program(v, u, t), SIDE_FAST)
+            for x, y in xy[1:]:
+                lines += top_touch(v, x, y, SIDE_FAST)
             touches += [{"kind": "top", "u": u, "t": t} for u, t in pts[1:]]
     else:
         if sides:
             lines += ["; The probe rod: the sides and the corner", f"T{v['rod_tool']} M6",
-                      "; Z0 on the top, for the side touches' depth", *studio_probe(*program(v, *pts[0]), fast=SIDE_FAST)]
+                      "; Z0 on the top, for the side touches' depth", *studio_probe(*xy[0], fast=SIDE_FAST)]
             touches.append({"kind": "rod_top", "u": pts[0][0], "t": pts[0][1]})
             lines += side_and_corner_touches()
-            lines.append(f"G0 Z{fmt(SAFE_Z)}")
+            lines.append(f"G0 Z{fmt(z1.SAFE_Z)}")
         lines += ["; The probe: the anchor plate and the top", f"T{PROBE_TOOL} M6"]
         if plate:
             touches.append({"kind": "fence"})
             lines += ["; The anchor plate's top, fence_height above the bed", *studio_probe(v["fence_x"], v["fence_y"])]
-        lines += ["; The top", *studio_probe(*program(v, *pts[0]))]
-        for u, t in pts[1:]:
-            lines += top_touch(v, *program(v, u, t), PROBE_FEED)
+        lines += ["; The top", *studio_probe(*xy[0])]
+        for x, y in xy[1:]:
+            lines += top_touch(v, x, y, z1.PROBE_FEED)
         touches += [{"kind": "top", "u": u, "t": t} for u, t in pts]
 
     named = [f"{n} on the {NAMES[(a, o)]}" for a, o, n in (("x", ox, v["side_x_points"]), ("y", oy, v["side_y_points"])) if n and sides]
@@ -297,13 +276,15 @@ def probe_job(v, fenced, corner, only=None, rod_only=False):
         "; probe-stock job, generated by probe-stock.py job - edit the script, not this file.",
         f"; Prints {what} to Studio's log with M498, with {tools}. No spindle, no cutting. Turn auto-leveling OFF.",
         "; Then run probe-stock.py save: it reads them from the log into stock.json for the macros.",
+        *([f"; --{'top' if only == 'top' else 'side'}-only: save keeps the saved {'side touches' if only == 'top' else 'top'}."]
+          if only else []),
         *(["; The probe rod only finds metal stock."] if sides or rod_only else []),
         "",
         "G90 G21",
         "M370 ; clear any auto-leveling grid left from an earlier job",
         "",
     ]
-    lines += [f"G0 Z{fmt(SAFE_Z)}", "G28", "M02"]
+    lines += [f"G0 Z{fmt(z1.SAFE_Z)}", "G28", "M02"]
     plan = {
         "stock": {"width": v["stock_width"], "length": v["stock_length"], "height": v["stock_height"], "origin": v["origin"]},
         "fence": {"x": v["fence_x"], "y": v["fence_y"], "height": v["fence_height"]} if plate else None,
@@ -314,11 +295,13 @@ def probe_job(v, fenced, corner, only=None, rod_only=False):
     return "\n".join(header + lines) + "\n", plan, f"{what}, with {tools}"
 
 
-def newest_probe_run(log):
-    runs = [r for r in stockref.read_logs(log) if r.name == PROBE_JOB]
+def newest_probe_run(runs, log):
+    """The newest probe run in `runs` (Studio's log, read), picked as stockref.fold() picks them."""
+    by_md5 = {e["md5"]: e for e in stockref.jobs()}
+    runs = [r for r in runs if stockref.is_probe(r, by_md5.get(r.md5))]
     if not runs:
         raise SystemExit(
-            f"probe-stock: no run of {PROBE_JOB} in {log}. Write it (probe-stock.py job) and run it on the machine"
+            f"probe-stock: no probe run in {log}. Write the job (probe-stock.py job) and run it on the machine"
             " first, or pass --log if Studio keeps its logs elsewhere"
         )
     return runs[-1]
@@ -333,7 +316,7 @@ def measure(run, plan):
             f" and {'stopped: ' + run.end if run.end and run.end != 'finished' else 'ended early'}. Run it again"
         )
     s = plan["stock"]
-    ox, oy = ORIGINS[s["origin"]]
+    ox, oy = z1.ORIGINS[s["origin"]]
     pairs = list(zip(touches, prints))
     origin = {t["axis"]: (p.x if t["axis"] == "x" else p.y) for t, p in pairs if t["kind"] == "origin"}
     top = [[t["u"], t["t"], round(p.z0, 3)] for t, p in pairs if t["kind"] == "top"]
@@ -380,12 +363,12 @@ def measure(run, plan):
     }
 
 
-def merge(reference, plan, run, log):
+def merge(reference, plan, run, log, runs):
     """A --top-only or --side-only run, with the rest from the saved reference as it was just before the run:
     any job written here that finished since is counted. Refuses when the stock may have moved or been cut."""
     only, s = plan["only"], plan["stock"]
     try:
-        before = stockref.load(log, until=(run.log, run.line))
+        before = stockref.load(log, until=(run.log, run.line), runs=runs)
     except SystemExit:
         if only == "sides":
             raise SystemExit("probe-stock: a --side-only run keeps the top from the saved reference, and there isn't one."
@@ -415,23 +398,26 @@ def merge(reference, plan, run, log):
         saved = next((h for u, t, h in before.top if rod and (u, t) == (plan["touches"][0]["u"], plan["touches"][0]["t"])), None)
         if rod and saved is not None:
             reference["rod_vs_saved_top"] = round(rod.z0 - saved, 3)
+            if abs(rod.z0 - saved) > TOP_MOVED:
+                raise SystemExit(f"probe-stock: the rod read the top beside the corner {rod.z0 - saved:+.3f} mm from the saved"
+                                 f" top there: the stock sits higher or lower, so the saved top no longer holds. {stop}")
     reference["probe"].update({k: reference.get(k) for k in ("top_from", "sides_from") if reference.get(k)})
     return reference
 
 
-def save_newest(log):
+def save_newest(runs, log):
     """Save the newest probe run in Studio's log as stock.json; a --top-only or --side-only one is merged."""
-    run = newest_probe_run(log)
+    run = newest_probe_run(runs, log)
     entry = next((e for e in stockref.jobs() if e["md5"] == run.md5 and e["kind"] == "probe"), None)
     if entry is None:
         raise SystemExit(
-            f"probe-stock: can't tell which {PROBE_JOB} played at {run.stamp}: "
+            f"probe-stock: can't tell which {run.name} played at {run.stamp}: "
             + ("Studio's log has no upload of it before then." if run.md5 is None else "it isn't one written here.")
             + " Write the job again (probe-stock.py job), upload it and run it"
         )
     reference = measure(run, entry["plan"])
     if entry["plan"].get("only"):
-        reference = merge(reference, entry["plan"], run, log)
+        reference = merge(reference, entry["plan"], run, log, runs)
     stockref.save(reference)
     return reference
 
@@ -445,20 +431,20 @@ def update(log):
     that (a job not written here, Studio's own probes) is still read from the log
     by the next macro, which stops on it as before.
     """
+    runs = stockref.read_logs(log)
     path = stockref.where() / "stock.json"
     try:
-        state = stockref.load(log)
+        state = stockref.load(log, runs=runs)
     except SystemExit:
         state = None
     if state is None or state.newer_probe:
         try:
-            save_newest(log)
-            print(f"saved the probe run of {newest_probe_run(log).stamp}")
+            print(f"saved the probe run of {save_newest(runs, log)['probe']['stamp']}")
         except SystemExit as e:
             if state is None:
                 raise
             print(f"didn't save the newer probe run: {str(e).removeprefix('probe-stock: ')}")
-    state = stockref.load(log)
+    state = stockref.load(log, runs=runs)
     reference = json.loads(path.read_text(encoding="utf-8"))
     settled = state.settled
     anchor = reference.get("anchor") or reference["probe"]
@@ -469,15 +455,16 @@ def update(log):
         for stamp, text in new:
             print(f"wrote in {stamp}  {text}")
         print(f"stock.json now runs up to {settled['anchor']['name']} at {settled['anchor']['stamp']}")
+        state = stockref.load(log, runs=runs)
     else:
         print("stock.json is up to date")
     print()
-    describe(stockref.load(log))
+    describe(state)
 
 
 def describe(state):
     """Print the stock as it is now."""
-    ox, oy = ORIGINS[state.origin]
+    ox, oy = z1.ORIGINS[state.origin]
     p = state.probe
     print(f"Stock {fmt(state.width)} x {fmt(state.length)} mm, origin {state.origin}, probed {p['stamp']} ({p['log']})")
     for part, key in (("top", "top_from"), ("sides", "sides_from")):
@@ -510,7 +497,7 @@ def describe(state):
         print(f"  {stamp}  {text}")
     for note in state.notes:
         print(f"note: {note}")
-    for problem in (state.newer_probe and f"probe-stock.nc ran again at {state.newer_probe}: run probe-stock.py save",
+    for problem in (state.newer_probe and f"{state.newer_probe}: run probe-stock.py save",
                     state.unsure and f"X0/Y0/Z0 may have moved: {state.unsure}"):
         if problem:
             print(f"warning: {problem}")
@@ -523,8 +510,9 @@ def main():
         out.write_text(
             "; Generated by probe-stock.py where - edit the script, not this file.\n"
             "; Prints X0/Y0/Z0 (G54) to Studio's log, so the macros know where they are.\n"
-            "; Studio first moves to X0 Y0 at the top of Z travel; the job itself only prints.\n"
-            "M498\nM02\n"
+            "; Studio first moves to X0 Y0 at the top of Z travel; the job itself only prints, then goes to\n"
+            "; clearance with G28, which is what Studio's log shows as the job finishing.\n"
+            "M498\nG28\nM02\n"
         )
         stockref.record(out, "where", "printed G54")
         print(f"wrote {out}: upload it and run it, then run the macro again")
@@ -539,8 +527,9 @@ def main():
         return
 
     if args.command == "save":
-        reference = save_newest(args.log)
-        state = stockref.load(args.log)
+        runs = stockref.read_logs(args.log)
+        reference = save_newest(runs, args.log)
+        state = stockref.load(args.log, runs=runs)
         describe(state)
         moved = {a: d for a, d in reference["moved"].items() if abs(d) > 0.001}
         if moved:
@@ -559,14 +548,12 @@ def main():
     if only == "top" and (args.corner or v["side_x_points"] or v["side_y_points"]):
         raise SystemExit("probe-stock: --top-only touches no sides; leave out --corner and --side-x-points/--side-y-points")
     corner = args.corner or only == "sides"  # the side touches move X0/Y0, so the corner puts them back
-    check(v, fenced, corner, args.probe_rod_only)
+    check(v, corner, args.probe_rod_only)
     program_text, plan, what = probe_job(v, fenced, corner, only, args.probe_rod_only)
     out = args.out or HERE / PROBE_JOB
     out.write_text(program_text)
     stockref.record(out, "probe", f"probed {what}", plan=plan)
     print(f"wrote {out}: {what}; no cutting")
-    if out.name != PROBE_JOB:
-        print(f"note: probe-stock.py save looks for {PROBE_JOB} in Studio's log; upload it under that name")
     if only:
         print(f"probe-stock.py save keeps the saved {'side touches' if only == 'top' else 'top'} with this run's")
     if corner or v["side_x_points"] or v["side_y_points"] or args.probe_rod_only:

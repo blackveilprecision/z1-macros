@@ -7,8 +7,10 @@ import unittest
 
 from helpers import ROOT
 
-OWN = {"toollib", "stockref"}  # the repo's own modules: tool-library and probe-stock
-MACROS = sorted(d for d in ROOT.iterdir() if d.is_dir() and not d.name.startswith(".") and d.name != "tests" and any(d.glob("*.py")))
+OWN = {"toollib", "stockref", "shared"}  # the repo's own modules: tool-library, probe-stock and shared/
+MACROS = sorted(
+    d for d in ROOT.iterdir() if d.is_dir() and not d.name.startswith(".") and d.name not in ("tests", "shared") and any(d.glob("*.py"))
+)
 
 
 class Repo(unittest.TestCase):
@@ -27,7 +29,7 @@ class Repo(unittest.TestCase):
 
     @unittest.skipUnless(hasattr(sys, "stdlib_module_names"), "needs Python 3.10+")
     def test_scripts_use_only_the_standard_library(self):
-        for script in (s for macro in MACROS for s in macro.glob("*.py")):
+        for script in [s for macro in MACROS for s in macro.glob("*.py")] + list((ROOT / "shared").glob("*.py")):
             tree = ast.parse(script.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 names = [a.name for a in node.names] if isinstance(node, ast.Import) else []
@@ -43,7 +45,8 @@ class Repo(unittest.TestCase):
             files = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.split("\n")
         except (OSError, subprocess.CalledProcessError):
             self.skipTest("not a git checkout")
-        generated = [f for f in files if f.endswith((".nc", ".tools")) or "/tools/" in f]
+        # Tool files in tool-library/custom/ are ours and committed; Makera's, downloaded into cache/, have no license
+        generated = [f for f in files if f.endswith(".nc") or f.startswith("tool-library/cache/")]
         self.assertEqual(generated, [], "generated files belong in the folder's .gitignore")
 
 

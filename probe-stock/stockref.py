@@ -22,26 +22,20 @@ import hashlib
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-STUDIO_LOGS = Path.home() / "Library/Application Support/MakeraStudio/logs"  # macOS; the scripts take --log elsewhere
+sys.path.insert(0, str(HERE.parent))
+from shared import z1  # noqa: E402
+
 PROBE_JOB = "probe-stock.nc"
 WHERE_JOB = "probe-stock-where.nc"
 ORIGIN_MOVED = 0.1  # X0/Y0 further than this from where the probe job left them: the stock or the origin moved
 KEEP_JOBS = 50      # jobs.json keeps the newest this many
 TIP_SLACK = 1.0     # A side cut counts for a rod reading when the cut's bottom and the rod's tip are this close
-
-# Origin corner -> its position in stock coordinates, as fractions of the stock's size from front-left
-ORIGINS = {
-    "topFrontLeft": (0.0, 0.0),
-    "topFrontRight": (1.0, 0.0),
-    "topBackLeft": (0.0, 1.0),
-    "topBackRight": (1.0, 1.0),
-    "topCenter": (0.5, 0.5),
-}
 
 # Studio's log, e.g.
 #   Debug    | 2026-10-06 19:32:06 Tue | :0,  | "[INFO]19:32:06.707 - Playing file: /sd/gcodes/macros/probe-stock.nc"
@@ -59,11 +53,6 @@ SENT = re.compile(r"Normal info: ((?:G10|G92)\b[^\"\\]*)")  # Studio echoes what
 STOPPED = re.compile(r"Normal info: ((?:Aborted|ALARM:|Soft Endstop)[^\"\\]*)|(System reset completed)")
 FINISHED = "G28 means goto clearance position"  # every job here ends with G28
 WANTED = ("Normal info", "Playing file", "upload_cmd", "XMODEM::send start", "System reset")
-
-
-def fmt(value):
-    s = f"{value:.3f}".rstrip("0").rstrip(".")
-    return "0" if s in ("-0", "") else s
 
 
 def where():
@@ -121,6 +110,8 @@ class Run:
 def read_logs(where_):
     """Every file played in Studio's logs (a folder, or one log file), oldest first."""
     files = sorted(where_.glob("log_*.txt")) if where_.is_dir() else [where_] if where_.is_file() else []
+    if not files:
+        raise SystemExit(f"stockref: no Studio log (log_*.txt) at {where_}; pass --log")
     runs, uploads, uploading, refmz, run = [], {}, None, None, None
     for path in files:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -189,6 +180,11 @@ def record(job, kind, text, **extra):
     (where() / "jobs.json").write_text(json.dumps(entries[-KEEP_JOBS:], indent=1) + "\n", encoding="utf-8")
 
 
+def is_probe(run, job):
+    """A run of probe-stock's job: probe-stock.nc, or any file written by probe-stock.py job (`job`, its jobs.json entry)."""
+    return run.name == PROBE_JOB or bool(job and job["kind"] == "probe")
+
+
 def save(reference):
     where().mkdir(parents=True, exist_ok=True)
     (where() / "stock.json").write_text(json.dumps(reference, indent=1) + "\n", encoding="utf-8")
@@ -210,7 +206,7 @@ class State:
     origin_xy: tuple        # G54 X/Y where the probe job left them
     machine: Print          # the last M498 in the log
     unsure: str = ""        # something since the last M498 that may have moved X0/Y0/Z0
-    newer_probe: str = ""   # when probe-stock.nc ran again after the saved run
+    newer_probe: str = ""   # a probe run after the saved one: "<name> probed again at <time>"
     unknown: str = ""       # the last job not written here that played since: it may have cut the stock
     history: list = field(default_factory=list)  # [(time, what)]
     notes: list = field(default_factory=list)    # jobs that didn't finish
@@ -223,15 +219,14 @@ class State:
 
     def program(self, u, t):
         """Stock coordinates -> the jobs' coordinates (from the origin corner)."""
-        ox, oy = ORIGINS[self.origin]
-        return u - ox * self.width, t - oy * self.length
+        return z1.to_program(self.origin, self.width, self.length, [(u, t)])[0]
 
     def check(self, who):
         """Stop `who` if a job can't be cut from this: the origin may have moved, or there's a newer probe run."""
         if self.newer_probe:
             raise SystemExit(
-                f"{who}: probe-stock.nc ran again at {self.newer_probe}, after the run in stock.json."
-                " Run probe-stock.py save first"
+                f"{who}: {self.newer_probe}, after the run in stock.json."
+                " Run probe-stock.py save (or update) first"
             )
         if self.unsure:
             raise SystemExit(
@@ -253,7 +248,7 @@ def apply(state, effect):
         # A rod reading is the widest from its tip up. It's the new width when the cut went down to about the tip;
         # a reading from well below the cut still includes side the cut didn't touch
         # The cut can't make a side wider: where it was already narrower, the reading stays
-        left = ORIGINS[state.origin][0] == 0
+        left = z1.ORIGINS[state.origin][0] == 0
         cut = (lambda u: min(u, effect["width"])) if left else (lambda u: max(u, state.width - effect["width"]))
         state.faces["x"] = [(t, tip, cut(old) if tip >= effect["bottom"] - TIP_SLACK else old)
                             for t, tip, old in state.faces.get("x", [])]
@@ -298,11 +293,11 @@ def fold(reference, runs, registry, until=None):
 
     for i, run in enumerate(runs[start:]):
         job = by_md5.get(run.md5)
-        probe = run.name == PROBE_JOB or (job and job["kind"] == "probe")
+        probe = is_probe(run, job)
         if i and until and (run.log, run.line) == tuple(until):
             break
         if i and probe and not until:
-            state.newer_probe = run.stamp
+            state.newer_probe = f"{run.name} probed again at {run.stamp}"
             break
         known = i == 0 or job is not None or probe  # the probe run's own prints are in the reference already
         for kind, value, stamp in (run.events if i else after_end(run)):
@@ -331,8 +326,9 @@ def fold(reference, runs, registry, until=None):
     return state
 
 
-def load(log=STUDIO_LOGS, until=None):
-    """The stock as it is now, from stock.json and Studio's log (or as it was before the run at `until`)."""
+def load(log=z1.STUDIO_LOGS, until=None, runs=None):
+    """The stock as it is now, from stock.json and Studio's log (or as it was before the run at `until`).
+    runs: the log already read with read_logs(), to read it once."""
     path = where() / "stock.json"
     try:
         reference = json.loads(path.read_text(encoding="utf-8"))
@@ -343,4 +339,4 @@ def load(log=STUDIO_LOGS, until=None):
         ) from None
     except json.JSONDecodeError as e:
         raise SystemExit(f"stockref: can't read {path} ({e})") from None
-    return fold(reference, read_logs(log), jobs(), until)
+    return fold(reference, read_logs(log) if runs is None else runs, jobs(), until)

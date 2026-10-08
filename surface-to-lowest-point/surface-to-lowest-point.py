@@ -19,16 +19,16 @@ Edit VARIABLES below (or pass flags, see --help), upload the .nc to the Z1
 from Makera Studio and start it with Auto leveling OFF (it bends the cut).
 """
 
-import argparse
 import bisect
 import math
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / "probe-stock"))
+sys.path[:0] = [str(HERE.parent), str(HERE.parent / "probe-stock")]
+from shared import cli, z1  # noqa: E402
+from shared.z1 import fmt  # noqa: E402
 import stockref  # noqa: E402
-from stockref import ORIGINS  # noqa: E402
 
 # --- VARIABLES (dimensions are POSITIVE values; the stock's come from probe-stock) ---
 VARIABLES = {
@@ -47,45 +47,24 @@ VARIABLES = {
     "plunge_feed": 200,     # mm/min plunge feed (plunges happen off the stock)
 }
 
-SAFE_Z = 15.0         # Retract height, same as Studio's exports
-APPROACH = 3.0        # Rapid down to this far above Z0 before plunging
-LEAD = 2.0            # Tool edge clearance past the X edges of the stock
-FLUTE_LENGTH = 12     # Header only, shown in Studio's tool list
-MAX_FEED = 1200       # Z1 limits from Studio's machine table
-MAX_RPM = 13000
 LIFT = 0.5            # Between passes, lift this far above the floor just cut to move to the next start
 SAMPLE = 0.25         # Spacing of the checks for material along each row
 
 FACE_JOB = "surface-to-lowest-point.nc"
 
 
-def fmt(value):
-    s = f"{value:.3f}".rstrip("0").rstrip(".")
-    return "0" if s in ("-0", "") else s
-
-
 def parse_args():
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    for name, default in VARIABLES.items():
-        flag = "--" + name.replace("_", "-")
-        if name == "cut_along":
-            p.add_argument(flag, default=default, choices=("x", "y"))
-        else:
-            p.add_argument(flag, type=type(default), default=default)
+    p = cli.parser(__doc__)
+    cli.add_variables(p, VARIABLES, {"cut_along": ("x", "y")})
     p.add_argument("--full-passes", action="store_true", help="every pass covers the whole top, even where it only cuts air")
-    p.add_argument("--log", type=Path, default=stockref.STUDIO_LOGS, help="Studio's log folder or one log file (default: %(default)s)")
-    p.add_argument("--tool", help="take tool_dia, rpm, feeds, pass_depth and stepover from this tool in"
-                   " ../tool-library (see tool-library/toollib.py list); options you pass still win")
-    p.add_argument("--material", default="Aluminum", help="which of the tool's presets to use (default: Aluminum)")
+    cli.add_log(p)
+    cli.add_tool(p)
     p.add_argument("-o", "--out", type=Path)
     return p.parse_args()
 
 
 def check(v):
-    errors = []
-    for name in ("round_to", "tool_dia", "stepover", "pass_depth"):
-        if v[name] <= 0:
-            errors.append(f"{name} must be positive")
+    errors = cli.positive(v, ("round_to", "tool_dia", "stepover", "pass_depth"))
     if v["final_height"] < 0:
         errors.append("final_height can't be negative (0 = from the probe run)")
     if v["stepover"] >= v["tool_dia"]:
@@ -96,18 +75,7 @@ def check(v):
         errors.append("finish_depth must be between 0 and pass_depth")
     if not 0 <= v["finish_stepover"] < v["tool_dia"]:
         errors.append("finish_stepover must be between 0 and tool_dia")
-    if not 0 < v["feed"] <= MAX_FEED or not 0 < v["plunge_feed"] <= MAX_FEED:
-        errors.append(f"feeds must be between 0 and {MAX_FEED} mm/min")
-    if not 0 < v["rpm"] <= MAX_RPM:
-        errors.append(f"rpm must be between 0 and {MAX_RPM}")
-    if errors:
-        raise SystemExit("surface-to-lowest-point: " + "; ".join(errors))
-
-
-def to_program(v, points):
-    """Stock coordinates (from the front-left corner) -> program coordinates for the chosen origin."""
-    ox, oy = ORIGINS[v["origin"]]
-    return [(u - ox * v["stock_width"], t - oy * v["stock_length"]) for u, t in points]
+    cli.stop("surface-to-lowest-point", errors + cli.feeds_and_rpm(v))
 
 
 def plan(v, state):
@@ -127,16 +95,20 @@ def plan(v, state):
 
 
 def finishing(v):
-    """Whether the last pass is a finishing pass: there's a finish depth and more to cut than it."""
-    return 0 < v["finish_depth"] < v["top_margin"] + v["stock_height"] - v["final_height"]
+    """Whether the last pass is a finishing pass: there's a finish depth (to 0.001) and more to cut than it."""
+    return 0 < round(v["finish_depth"], 3) < v["top_margin"] + v["stock_height"] - v["final_height"]
 
 
 def levels(v):
-    """Pass depths from the highest point, down to the final one; with finishing, roughing stops finish_depth above it."""
-    top, target = v["top_margin"], v["final_height"] - v["stock_height"]
-    rough = target + v["finish_depth"] if finishing(v) else target
+    """Pass depths from the highest point, down to the final one; with finishing, roughing stops finish_depth above it.
+
+    Rounded to 0.001 as the G-code writes them, so no two are written the same.
+    """
+    top, target = round(v["top_margin"], 3), round(v["final_height"] - v["stock_height"], 3)
+    rough = round(target + round(v["finish_depth"], 3), 3) if finishing(v) else target
     count = math.ceil((top - rough) / v["pass_depth"] - 1e-9)
-    return [top - k * v["pass_depth"] for k in range(1, count)] + [rough] + ([target] if finishing(v) else [])
+    zs = [round(top - k * v["pass_depth"], 3) for k in range(1, count)] + [rough] + ([target] if finishing(v) else [])
+    return [z for z, below in zip(zs, zs[1:] + [None]) if z != below]
 
 
 def interp(xs, hs, x):
@@ -169,29 +141,36 @@ class Top:
 
 
 def frame(v):
-    """Passes run along a and step across b: (length along, width across, (a, b) -> stock (u, t))."""
+    """Passes run along a and step across b: ((lo, hi) along, (lo, hi) across, (a, b) -> stock (u, t))."""
     if v["cut_along"] == "y":
-        return v["stock_length"], v["stock_width"], lambda a, b: (b, a)
-    return v["stock_width"], v["stock_length"], lambda a, b: (a, b)
+        return v["y_range"], v["x_range"], lambda a, b: (b, a)
+    return v["x_range"], v["y_range"], lambda a, b: (a, b)
+
+
+def ends(v):
+    """Where a row starts and ends along a: the cutter clear of the stock by LEAD."""
+    (lo, hi), _, _ = frame(v)
+    r = v["tool_dia"] / 2
+    return lo - (r + z1.LEAD), hi + r + z1.LEAD
 
 
 def rows_across(v, stepover=None):
     """Where the passes run across the stock: both edges and evenly between, no more than stepover apart."""
-    _, width, _ = frame(v)
-    n = math.ceil(width / (stepover or v["stepover"]) - 1e-9)
-    return [width * i / n for i in range(n + 1)], width / n
+    _, (lo, hi), _ = frame(v)
+    n = math.ceil((hi - lo) / (stepover or v["stepover"]) - 1e-9)
+    return [lo + (hi - lo) * i / n for i in range(n + 1)], (hi - lo) / n
 
 
 def material(v, top, bs):
     """For every row, the highest the top reaches under the cutter, sampled along the row."""
-    length, width, stock = frame(v)
+    (a_lo, a_hi), (b_lo, b_hi), stock = frame(v)
     r = v["tool_dia"] / 2
     cross = top.us if v["cut_along"] == "y" else top.ts  # the top is straight between these, across a row
-    n = math.ceil(length / SAMPLE)
-    samples = [length * i / n for i in range(n + 1)]
+    n = math.ceil((a_hi - a_lo) / SAMPLE)
+    samples = [a_lo + (a_hi - a_lo) * i / n for i in range(n + 1)]
     profile = []
     for b in bs:
-        lo, hi = max(0.0, b - r), min(width, b + r)
+        lo, hi = max(b_lo, b - r), min(b_hi, b + r)
         across = [lo, hi] + [c for c in cross if lo < c < hi]
         profile.append([max(top.at(*stock(a, c)) for c in across) for a in samples])
     return samples, profile
@@ -203,12 +182,12 @@ def spans(v, samples, profile, z):
     A row is cut wherever the top under the cutter is within air_margin of the pass,
     plus the cutter's radius and LEAD at both ends, so it starts and ends clear.
     """
-    length, _, _ = frame(v)
+    lo, hi = ends(v)
     r = v["tool_dia"] / 2
     out = []
     for row in profile:
         hit = [a for a, top in zip(samples, row) if top + v["air_margin"] > z]
-        out.append((max(-(r + LEAD), hit[0] - r - LEAD), min(length + r + LEAD, hit[-1] + r + LEAD)) if hit else None)
+        out.append((max(lo, hit[0] - r - z1.LEAD), min(hi, hit[-1] + r + z1.LEAD)) if hit else None)
     return out
 
 
@@ -237,8 +216,7 @@ def layer_path(v, bs, row_spans, near):
     Of the four ways to run the zig-zag, the one whose first row has the least clear
     stretch from the edge to its material, then the one starting nearest `near`.
     """
-    length, _, _ = frame(v)
-    edge_lo, edge_hi = -(v["tool_dia"] / 2 + LEAD), length + v["tool_dia"] / 2 + LEAD
+    edge_lo, edge_hi = ends(v)
     rows = [(b, s) for b, s in zip(bs, row_spans) if s]
     best = None
     for order in (rows, rows[::-1]):
@@ -253,7 +231,7 @@ def layer_path(v, bs, row_spans, near):
     return best[1]
 
 
-def build(v, note, z0, shift, top=None):
+def build(v, note, z0, shift, top=None, flute_length=z1.FLUTE_LENGTH):
     """The facing job. It doesn't probe: Z0 stays where it is (G54 Z z0, from the log) and
     the highest point is shift above it, so every Z is raised by shift. Only the cutter
     goes in, measured against the probe at the tool change.
@@ -264,16 +242,15 @@ def build(v, note, z0, shift, top=None):
     whole top too, so the finishing pass after it takes the same finish_depth
     everywhere, on rows finish_stepover apart.
     """
-    length, width, stock = frame(v)
-    r = v["tool_dia"] / 2
+    _, _, stock = frame(v)
     bs, step = rows_across(v)
-    full_rows = [(b, (-(r + LEAD), length + r + LEAD)) for b in bs]
+    full_rows = [(b, ends(v)) for b in bs]
     full = zigzag(full_rows, True)
     zs = [z + shift for z in levels(v)]
     if top:
         samples, profile = material(v, top, bs)
     fin_bs, fin_step = rows_across(v, v["finish_stepover"] or v["tool_dia"] / 2)
-    fin_rows = [(b, (-(r + LEAD), length + r + LEAD)) for b in fin_bs]
+    fin_rows = [(b, ends(v)) for b in fin_bs]
 
     passes, near = [], None  # (level, z, (a, b) points)
     for n, z in enumerate(zs, 1):
@@ -288,58 +265,35 @@ def build(v, note, z0, shift, top=None):
             if not any(row_spans):
                 continue
             path = layer_path(v, bs, row_spans, near)
-        passes.append((n, z, to_program(v, [stock(a, b) for a, b in path])))
+        passes.append((n, z, z1.to_program(v["origin"], v["stock_width"], v["stock_length"], [stock(a, b) for a, b in path])))
         near = path[-1]
 
-    safe_z = SAFE_Z + shift
+    safe_z = z1.SAFE_Z + shift
     seconds = 0.0
-    body = []
     x, y = passes[0][2][0]
-    approach_z = v["top_margin"] + APPROACH + shift
-    body += [f"G0 X{fmt(x)} Y{fmt(y)}", f"S{v['rpm']} M3", f"G0 Z{fmt(safe_z)}", f"G0 Z{fmt(approach_z)}"]
+    approach_z = v["top_margin"] + z1.APPROACH + shift
+    body = z1.spindle_on(x, y, v["rpm"], safe_z, approach_z)
     z_prev, at, floor = approach_z, (x, y), None
-    for n, z, pts in passes:
+    for k, (n, z, pts) in enumerate(passes, 1):
         if pts[0] != at:  # lift off the floor just cut and move to this pass's start, beyond the stock's edge
             (x0, y0), (x, y) = at, pts[0]
             body += [f"G0 Z{fmt(floor + LIFT)}", f"G0 X{fmt(x)} Y{fmt(y)}"]
-            seconds += (floor + LIFT - z_prev + math.hypot(x - x0, y - y0)) / MAX_FEED * 60
+            seconds += (floor + LIFT - z_prev + math.hypot(x - x0, y - y0)) / z1.MAX_FEED * 60
             z_prev = floor + LIFT
-        body.append(f"; Level {n}/{len(zs)} Z{fmt(z)}" + (", finishing" if finishing(v) and n == len(zs) else ""))
-        body.append(f"G1 Z{fmt(z)} F{v['plunge_feed']}")
-        seconds += abs(z_prev - z) / v["plunge_feed"] * 60
-        feed = f" F{v['feed']}"
-        for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
-            words = (f"X{fmt(x1)}" if x1 != x0 else "") + (f" Y{fmt(y1)}" if y1 != y0 else "")
-            body.append(f"G1 {words.strip()}{feed}")
-            seconds += math.hypot(x1 - x0, y1 - y0) / v["feed"] * 60
-            feed = ""
+        body.append(f"; Level {k}/{len(passes)} Z{fmt(z)}" + (", finishing" if finishing(v) and n == len(zs) else ""))
+        lines, seconds = z1.cut(z, z_prev, pts, v["plunge_feed"], v["feed"], seconds)
+        body += lines
         z_prev, at, floor = z, pts[-1], z
-    body += [f"G0 Z{fmt(safe_z)}", "M9", "M05", "G28", "M02"]
+    body += z1.end(safe_z)
 
     w, l, h, d = v["stock_width"], v["stock_length"], v["stock_height"], v["tool_dia"]
-    ox, oy = ORIGINS[v["origin"]]
-    header = [
-        ";@MKR|BEGIN",
-        ";@MKR|SCHEMA|v=1.0.0",
-        ";@MKR|MACHINE|id=Z1|name=Makera Z1",
-        ";@MKR|MATERIAL|id=|name3=other|name1=Aluminum Alloys|name2=6061 Aluminum|uuid1=019bfadc-e599-74ef-b4ba-f34413e6f231",
-        f";@MKR|STOCK|id=cuboid|length={fmt(w)}|width={fmt(l)}|height={fmt(h)}|diameter=50",
-        f";@MKR|ORIGIN|id=0|type_name={v['origin']}|x={fmt((ox - 0.5) * w)}|y={fmt((oy - 0.5) * l)}|z={fmt(h / 2)}",
-        ";@MKR|CAM|id=surface-to-lowest-point|name=surface-to-lowest-point.py|v=1.0.0",
-        ";@MKR|UNIT|value=mm",
-        f";@MKR|MAXFEEDRATE|value={MAX_FEED}",
-        f";@MKR|TOOL|number=1|id=|name={fmt(d)}mm Flat End|type=Flat End|handlediameter={fmt(d)}|sticklength=0"
-        f"|shoulderlength={FLUTE_LENGTH}|flutelength={FLUTE_LENGTH}|diameter={fmt(d)}|tipdiameter={fmt(d)}"
-        "|cornerradius=0|angle=0|halfAngle=0",
-        f";@MKR|TIME|seconds={round(seconds)}",
-        ";@MKR|TOOLPATH|number=1|tool_number=1|name=[T1]Surface To Lowest Point",
-        ";@MKR|END",
-        "",
-        "; Generated by surface-to-lowest-point.py (github.com/blackveilprecision/z1-macros) - edit the script, not this file.",
+    wide, deep = (hi - lo for lo, hi in (v["x_range"], v["y_range"]))
+    header = z1.start("surface-to-lowest-point", (w, l, h), v["origin"], d, seconds, [
         f"; Stock {fmt(w)} x {fmt(l)} mm, {fmt(h)} mm thick at the highest point, origin {v['origin']}.",
+        *([f"; Passes cover {fmt(wide)} x {fmt(deep)} mm, out to the sides the probe rod touched."] if (wide, deep) != (w, l) else []),
         f"; {note}",
         f"; No probing: Z0 stays where it is, G54 Z {z0:.3f}; the highest point is {fmt(shift)} mm above it.",
-        f"; Turn auto-leveling OFF. Cuts Z{fmt(v['top_margin'] + shift)} -> Z{fmt(zs[-1])} in {len(zs)} passes"
+        f"; Turn auto-leveling OFF. Cuts Z{fmt(passes[0][1])} -> Z{fmt(zs[-1])} in {len(passes)} passes"
         f" of <= {fmt(v['pass_depth'])} mm along {v['cut_along'].upper()}, {fmt(step)} mm stepover, {fmt(d)} mm tool.",
         *([f"; The last is a finishing pass, {fmt(v['finish_depth'])} mm deep over the whole top at {fmt(fin_step)} mm stepover."]
           if finishing(v) else []),
@@ -347,38 +301,23 @@ def build(v, note, z0, shift, top=None):
             f"Each pass covers only where the probed top is within {fmt(v['air_margin'])} mm of it; the last covers"
             " the whole top. Every pass starts beyond the stock's edge." if top else "Every pass covers the whole top."
         ),
-        "",
-        "G90 G21",
-        ";@MKR|TOOLPATH_START|toolpath_number=1",
-        "",
-        "M370 ; clear any auto-leveling grid left from an earlier job",
-        f"M498 ; G54 Z should read {z0:.3f}: stop the job if not",
-        "",
-        f"; T1-{fmt(d)}mm Flat End",
-        "",
-        "T1 M6",
-        "M7",
-    ]
+    ], g54_z=z0, flute_length=flute_length)
     return "\n".join(header + body) + "\n", len(passes), seconds
 
 
 def main():
     args = parse_args()
     v = {name: getattr(args, name) for name in VARIABLES}
-    if args.tool:  # the tool library is only needed with --tool, so this script also runs without it
-        sys.path.insert(0, str(HERE.parent / "tool-library"))
-        import toollib
-
-        tool, preset = toollib.apply(v, args.tool, args.material)
-        print(
-            f"tool: {tool.description} ({tool.source}), {preset.name}: {fmt(v['tool_dia'])} mm, {v['rpm']} rpm,"
-            f" {v['feed']} mm/min, plunge {v['plunge_feed']}, {fmt(v['pass_depth'])} mm passes, {fmt(v['stepover'])} mm stepover"
-        )
+    flute_length = cli.take_tool(v, args)
     check(v)
 
     state = stockref.load(args.log)
     state.check("surface-to-lowest-point")
     v.update(stock_width=state.width, stock_length=state.length, origin=state.origin)
+    # Passes cover the stock out to the sides the rod touched, where they're past the sizes typed for the probe job
+    xs = [0.0, state.width, *(u for _, _, u in state.faces.get("x", []))]
+    ys = [0.0, state.length, *(t for _, _, t in state.faces.get("y", []))]
+    v.update(x_range=(min(xs), max(xs)), y_range=(min(ys), max(ys)))
     rows, thickest, lowest, final, shift = plan(v, state)
     high = max(rows, key=lambda r: r[2])
     low = min(rows, key=lambda r: r[3])
@@ -388,6 +327,10 @@ def main():
         mark = "  highest" if (x, y) == high[:2] else "  lowest" if (x, y) == low[:2] else ""
         print(f"  {x:7.1f} {y:7.1f} {height:8.3f} {thick:10.3f}{mark}")
     print(f"Thicknesses are from {state.bed_from}.")
+    wide, deep = (hi - lo for lo, hi in (v["x_range"], v["y_range"]))
+    if (wide, deep) != (state.width, state.length):
+        print(f"The sides touched with the rod are past {fmt(state.width)} x {fmt(state.length)} mm:"
+              f" passes cover {fmt(wide)} x {fmt(deep)} mm.")
     for stamp, text in state.history:
         print(f"Since then: {stamp} {text}")
     for note in state.notes:
@@ -414,7 +357,7 @@ def main():
     print(f"Z0 is G54 Z {z0:.3f} (printed {state.machine.stamp}): the highest point is {shift:.3f} mm above it.\n")
 
     top = None if args.full_passes else stockref_top(state)
-    program, passes, seconds = build(v, note, z0, shift, top)
+    program, passes, seconds = build(v, note, z0, shift, top, flute_length)
     out = args.out or HERE / FACE_JOB
     out.write_text(program)
     stockref.record(out, "cut", f"top faced flat, {fmt(v['final_height'])} mm thick",
@@ -424,9 +367,12 @@ def main():
         f"wrote {out} ({passes} passes along {v['cut_along'].upper()}, ~{seconds / 60:.0f} min{saved},"
         f" {fmt(v['stock_height'])} -> {fmt(v['final_height'])} mm thick)"
     )
-    print(f"clamps and vise jaws must sit below {fmt(v['final_height'])} mm: the cutter runs past the stock edges")
-    print("upload it and start it with Auto leveling off, without changing Z0 or running anything else first;")
-    print(f"it doesn't probe. Before the cutter goes in, Studio's log should show G54 Z {z0:.3f}: stop the job if not")
+    along, across = ("front and back", "left and right") if v["cut_along"] == "y" else ("left and right", "front and back")
+    print(f"clamps and vise jaws must sit below {fmt(v['final_height'])} mm within {fmt(v['tool_dia'] + z1.LEAD)} mm of the"
+          f" {along} edges and {fmt(v['tool_dia'] / 2)} mm of the {across}: the cutter runs that far past them")
+    print("upload it and start it with Auto leveling off, without changing Z0 or running anything else first,")
+    print("and with the probe or no tool in: the tool change is the only stop, and with T1 already in it doesn't stop.")
+    print(f"It doesn't probe. Before you confirm the tool change, Studio's log should show G54 Z {z0:.3f}: stop the job if not")
 
 
 def stockref_top(state):

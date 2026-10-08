@@ -3,9 +3,10 @@
 
 Reads the tool's type and sizes from the listing's title, bullets and spec
 tables, copies the holder, presets and post settings from the closest tool of
-the same type in your Fusion libraries, and writes a one-tool .json library
-to tools/, named after the tool. Import that in Fusion's Tool Library, then
-drag the tool into your own library.
+the same type in --library, the tool library (ours, then Makera's) or Fusion's
+local libraries, and writes a one-tool .json library to ../tool-library/custom/,
+named after the tool, where the macros' --tool finds it. Import that in Fusion's
+Tool Library, then drag the tool into your own library.
 
 Flat end mills, ball end mills, chamfer mills (chamfer and V-bits) and drills
 are supported. Sellers' listings are often incomplete or wrong: the script
@@ -21,8 +22,8 @@ import html
 import json
 import math
 import operator
-import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -32,19 +33,10 @@ import zipfile
 from fractions import Fraction
 from pathlib import Path
 
-# Searched for a template of the same type after --library: the repo's tool library (our tools, then Makera's),
-# then Fusion's local tool libraries. Z1_TOOLS (paths separated by os.pathsep) replaces them, as in toollib.
-TOOL_LIBRARY = Path(__file__).resolve().parent.parent / "tool-library"
-LOCAL_LIBRARIES = [
-    Path.home() / "Library/Application Support/Autodesk/CAM360/libraries/Local",  # macOS
-    *([Path(os.environ["APPDATA"]) / "Autodesk/CAM360/libraries/Local"] if "APPDATA" in os.environ else []),  # Windows
-]
-
-
-def template_roots():
-    if os.environ.get("Z1_TOOLS"):
-        return [Path(p) for p in os.environ["Z1_TOOLS"].split(os.pathsep) if p]
-    return [TOOL_LIBRARY / "custom", TOOL_LIBRARY / "cache", *LOCAL_LIBRARIES]
+HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(HERE.parent), str(HERE.parent / "tool-library")]
+import toollib  # noqa: E402
+from shared.z1 import fmt  # noqa: E402
 
 INCH = 25.4
 HEADERS = {
@@ -54,7 +46,6 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip",
 }
-HERE = Path(__file__).resolve().parent
 
 # --type -> Fusion's tool type, and the noun used in the description
 TYPES = {"flat": "flat end mill", "ball": "ball end mill", "chamfer": "chamfer mill", "drill": "drill"}
@@ -117,11 +108,6 @@ CLEAN = str.maketrans({
 OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv}
 
 
-def fmt(value):
-    s = f"{value:.3f}".rstrip("0").rstrip(".")
-    return "0" if s in ("-0", "") else s
-
-
 def clean(fragment):
     text = re.sub(r"<(script|style)\b.*?</\1>", " ", fragment, flags=re.S | re.I)
     text = html.unescape(re.sub(r"<[^>]+>", " ", text)).translate(CLEAN)
@@ -141,10 +127,19 @@ def to_mm(num, unit, inch=False):
 
 
 def snap(mm, inch):
-    """Spec tables round to 2 places (1/8" is '0.13 inches' or '3.18 millimeters'): undo that for 1/64" sizes."""
+    """Spec tables round to 2 places (1/8" is '0.13 inches' or '3.18 millimeters'): undo that for 1/64" sizes.
+
+    Metric tools are listed in inches too, and 0.16 inches is 5/32" or 4 mm rounded. Then the value
+    stays as read and the two sizes it could be come back for a Check note: (mm, None or (inch, metric)).
+    """
     n = round(mm / INCH * 64)
     exact = n * INCH / 64
-    return exact if n and abs(exact - mm) <= 0.0051 * (INCH if inch else 1) else mm
+    if not n or abs(exact - mm) > 0.0051 * (INCH if inch else 1):
+        return mm, None
+    metric = round(mm * 2) / 2
+    if inch and metric and abs(metric - mm) <= 0.005 * INCH:
+        return mm, (exact, metric)
+    return exact, None
 
 
 def size_label(mm):
@@ -239,8 +234,10 @@ def labeled(clause, label):
 
 
 def candidates(listing):
-    """Every size the listing states, as field -> [(value, rank, where)]."""
+    """Every size the listing states, as field -> [(value, rank, where)]; the size name; and where -> note for spec
+    values that could be an inch or a metric size."""
     found = {name: [] for name in NAMES}
+    unsure = {}
 
     def add(field, value, rank, where):
         if value is not None and (value > 0 or field == "tip" and value == 0):
@@ -287,7 +284,14 @@ def candidates(listing):
         m = key and re.search(VALUE, rows[key], re.I)
         if m and (mm := to_mm(m["num"], m["unit"])):
             inch = not (m["unit"] or "").lower().startswith("m")
-            add(field, snap(mm, inch), SPEC, f'spec "{key}: {rows[key]}"')
+            value, either = snap(mm, inch)
+            where = f'spec "{key}: {rows[key]}"'
+            add(field, value, SPEC, where)
+            if either:
+                unsure[where] = (
+                    f"{NAMES[field][0]}: {where} is {size_label(either[0])} or {fmt(either[1])} mm rounded;"
+                    f" using {fmt(value)} mm as read: pass {NAMES[field][1]}"
+                )
     key = next((k for k in ANGLE_ROWS if k in rows), None)
     m = key and re.search(r"\d+(?:\.\d+)?", rows[key])
     if m:
@@ -295,7 +299,7 @@ def candidates(listing):
     m = re.search(r"\d+", rows.get("number of flutes", ""))
     if m:
         add("flutes", int(m.group(0)), SPEC, f'spec "number of flutes: {rows["number of flutes"]}"')
-    return found, size
+    return found, size, unsure
 
 
 def choose(found):
@@ -380,32 +384,22 @@ def evaluate(expr, names):
         return None
 
 
-def load_library(path):
-    """A Fusion library: an exported .tools file (zipped JSON) or a local library's .json."""
-    if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as z:
-            name = next(n for n in z.namelist() if n.endswith(".json"))
-            return json.loads(z.read(name))
-    return json.loads(Path(path).read_text(encoding="utf-8"))
-
-
 def library_tools(extra):
-    """(library path, library, tool) for every tool in --library files, then in Fusion's local libraries."""
+    """(library path, library, tool) for every tool in --library files, then in the tool library's: ours, Makera's
+    (downloaded the first time) and Fusion's local libraries (see tool-library/toollib.py; Z1_TOOLS replaces them)."""
     pool = []
     for path in extra:
         try:
-            library = load_library(path)
-        except (OSError, StopIteration, zipfile.BadZipFile, json.JSONDecodeError) as e:
+            library = toollib.load_library(path)
+        except (OSError, ValueError, StopIteration, zipfile.BadZipFile) as e:
             raise SystemExit(f"amazon-tool: can't read the Fusion library {path} ({e})")
-        pool += [(path, library, tool) for tool in library.get("data", [])]
-    for root in template_roots():
-        files = sorted(f for f in root.rglob("*") if f.suffix in (".json", ".tools")) if root.is_dir() else []
-        for path in files if root.is_dir() else [root] if root.is_file() else []:
-            try:
-                library = load_library(path)
-            except (OSError, StopIteration, zipfile.BadZipFile, json.JSONDecodeError):
-                continue
-            pool += [(path, library, tool) for tool in library.get("data", []) if isinstance(tool, dict)]
+        pool += [(path, library, tool) for tool in library.get("data", []) if isinstance(tool, dict)]
+    for path in toollib.library_files():
+        try:
+            library = toollib.load_library(path)
+        except (OSError, ValueError, StopIteration, zipfile.BadZipFile):
+            continue
+        pool += [(path, library, tool) for tool in library.get("data", []) if isinstance(tool, dict)]
     return pool
 
 
@@ -420,8 +414,8 @@ def pick_template(pool, kind, t, wanted):
     if not cands:
         where = f' matching "{wanted}"' if wanted else ""
         raise SystemExit(
-            f"amazon-tool: no metric {TYPES[kind]}{where} in your Fusion libraries to copy the holder and presets from."
-            " Add one in Fusion (or pass --library FILE)"
+            f"amazon-tool: no metric {TYPES[kind]}{where} in the tool library or Fusion's local libraries to copy the"
+            " holder and presets from. Add one to ../tool-library/custom or Fusion, or pass --library FILE"
         )
 
     def score(c):
@@ -525,7 +519,7 @@ def parse_args():
     p.add_argument("--template", help="copy the holder and presets from the tool whose description contains this")
     p.add_argument("--library", type=Path, action="append", default=[], help="extra Fusion library (.json or exported .tools) to search for a template")
     p.add_argument("-o", "--out", type=Path, help="output file (default: ../tool-library/custom/<tool description>.json)")
-    p.add_argument("--number", type=int, default=1, help="tool number (default: 1)")
+    p.add_argument("--number", type=int, default=1, help="tool number, 1-999 (default: 1)")
     sizes = p.add_argument_group("override what the listing says (mm and degrees)")
     sizes.add_argument("--dia", type=float, help="cutting diameter; for a chamfer mill, the widest part of the cone")
     sizes.add_argument("--shank-dia", dest="shank", type=float)
@@ -541,6 +535,17 @@ def parse_args():
     args = p.parse_args()
     if not args.url and not args.html:
         p.error("give an Amazon link or --html PAGE")
+    if not 1 <= args.number <= 999:
+        p.error("--number must be 1-999: the spindle only runs tools 1-999 (T0 is the probe)")
+    if args.flutes is not None and args.flutes < 1:
+        p.error("--flutes must be at least 1")
+    positive = (("dia", "--dia"), ("shank", "--shank-dia"), ("flute_length", "--flute-length"),
+                ("overall_length", "--overall-length"), ("shoulder_length", "--shoulder-length"))
+    for name, flag in positive:
+        if getattr(args, name) is not None and getattr(args, name) <= 0:
+            p.error(f"{flag} must be positive")
+    if args.tip is not None and args.tip < 0:
+        p.error("--tip-dia can't be negative")
     return args
 
 
@@ -564,7 +569,7 @@ def main():
         raise SystemExit("amazon-tool: that doesn't look like an Amazon product page")
     kind, kind_source = (args.type, "--type") if args.type else detect_type(listing)
 
-    found, size = candidates(listing)
+    found, size, unsure = candidates(listing)
     ignored = []
     oal = args.overall_length or min(found["overall_length"], key=lambda c: c[1], default=(None,))[0]
     if oal:  # sellers often fill in "Cutting Length" with the overall length
@@ -616,7 +621,9 @@ def main():
 
     # Fusion names an imported library after its file: the description, with 1/8" written as 1-8in
     name = re.sub(r'[<>:\\|?*\x00-\x1f]+', "", t["description"].replace('"', "in").replace("/", "-")).strip(" .")
-    out = args.out or TOOL_LIBRARY / "custom" / f"{name}.json"
+    out = args.out or toollib.CUSTOM / f"{name}.json"
+    if not args.out and out.exists():  # another tool by the same name, or this one with your edits
+        raise SystemExit(f"amazon-tool: {out} is already there; pass --description to name this tool, or -o to replace it")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"data": [tool], "version": library.get("version", 37)}, indent=4, sort_keys=True) + "\n")
 
@@ -639,6 +646,7 @@ def main():
     )
 
     notes = [c for f in NEEDS[kind] if f in picked and sources[f] == picked[f][1] for c in conflicts.get(f, [])]
+    notes += [unsure[sources[f]] for f in NEEDS[kind] if sources[f] in unsure]
     notes += [f"ignored {where}: {fmt(v)} mm leaves no shank to hold" for v, _, where in ignored]
     if abs(tg["DC"] - t["dia"]) > 0.05:
         notes.append(f"the presets are for a {fmt(tg['DC'])} mm tool: set feeds and speeds for {fmt(t['dia'])} mm")

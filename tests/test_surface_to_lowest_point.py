@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import ORIGINS, PROBE_STOCK, ROOT, Machine, levels, moves, plunges_over_stock, run
+from helpers import ORIGINS, PROBE_STOCK, ROOT, X0, Y0, Machine, levels, moves, plunges_over_stock, run
 
 SCRIPT = ROOT / "surface-to-lowest-point" / "surface-to-lowest-point.py"
 SURFACE_STOCK = ROOT / "surface-stock" / "surface-stock.py"
@@ -78,6 +78,8 @@ def passes(program):
 def covered(segments, px, py, r):
     """Whether the cutter (radius r) passes over (px, py) on one of the segments."""
     for x0, y0, x1, y1 in segments:
+        if min(x0, x1) - r > px or px > max(x0, x1) + r or min(y0, y1) - r > py or py > max(y0, y1) + r:
+            continue  # nowhere near it
         dx, dy = x1 - x0, y1 - y0
         t = 0.0 if dx == dy == 0 else max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)))
         if math.hypot(px - x0 - t * dx, py - y0 - t * dy) <= r + 1e-6:
@@ -243,17 +245,18 @@ class SurfaceToLowestPoint(unittest.TestCase):
     def test_passes_cover_everything_above_them(self):
         points = self.points()
         tops = {"bumpy": SPREAD, "tilted": tilted(points), "dome": dome(points), "across": across(points)}
+        grid = [(x, y) for x in range(0, 66, 2) for y in range(0, 51, 2)]
         for name, zs in tops.items():
+            self.probe(zs)  # generating doesn't play the job, so both directions cut from this
+            top = top_model(points, zs)
+            heights = {p: top(*p) for p in grid}
             for along in ("y", "x"):
                 with self.subTest(top=name, cut_along=along):
-                    self.probe(zs)
                     _, program = self.generate("--cut-along", along)
-                    top = top_model(points, zs)
                     cuts, rapids = passes(program)
                     zs_cut = sorted(cuts, reverse=True)
-                    grid = [(x, y) for x in range(0, 66, 2) for y in range(0, 51, 2)]
                     for z in zs_cut:
-                        above = [(x, y) for x, y in grid if top(x, y) > z + 1e-6]
+                        above = [p for p in grid if heights[p] > z + 1e-6]
                         missed = [p for p in above if not covered(cuts[z], *p, RADIUS)]
                         self.assertEqual(missed[:5], [], f"material above the pass at Z{z} left uncut")
                     self.assertEqual([p for p in grid if not covered(cuts[zs_cut[-1]], *p, RADIUS)], [], "last pass")
@@ -270,6 +273,47 @@ class SurfaceToLowestPoint(unittest.TestCase):
                                      "every pass goes down beyond the stock's edge")
                     low = [(z, floor) for z, floor in rapids if floor is not None and z < floor + LIFT - 1e-6]
                     self.assertEqual(low, [], "moves between passes clear the floor just cut")
+
+    def test_covers_the_sides_the_rod_measured(self):
+        # The rod finds the side across from the origin 3 mm and the back or front 2.5 mm past the sizes typed for the job
+        wide, deep = WIDTH + 3, LENGTH + 2.5
+        rod = SPREAD[0]
+        grid = [(x / 2, y / 2) for x in range(0, round(wide * 2) + 1, 4) for y in range(0, round(deep * 2) + 1, 4)]
+        for origin in ("topFrontLeft", "topBackRight"):
+            sx, sy = (1, 1) if origin == "topFrontLeft" else (-1, -1)  # which way each side's touch moves X0/Y0
+            sides = [rod, (X0 + sx * 3, Y0, rod), (X0, Y0, rod), (X0, Y0 + sy * 2.5, rod), (X0, Y0, rod)]
+            self.probe(sides + SPREAD, "--origin", origin, "--side-x-points", 1, "--side-y-points", 1)
+            (x0, _), (y0, _) = ((0, 0), (0, 0)) if origin == "topFrontLeft" else ((-wide, 0), (-deep, 0))
+            for along in ("y", "x"):
+                with self.subTest(origin=origin, cut_along=along):
+                    r, program = self.generate("--cut-along", along)
+                    self.assertIn("passes cover 68.4 x 52.9 mm", r.stdout)
+                    self.assertEqual(plunges_over_stock(program, origin, wide, deep, RADIUS, top=1e9), [])
+                    cuts, _ = passes(program)
+                    last = cuts[min(cuts)]
+                    missed = [p for p in grid if not covered(last, x0 + p[0], y0 + p[1], RADIUS)]
+                    self.assertEqual(missed, [], "the last pass covers it all")
+
+    def test_no_level_written_twice(self):
+        self.probe(HIGH_LAST)  # Z0 on the highest point, 33 mm thick
+        cases = {  # each made two levels the G-code wrote the same
+            "roughing ends 0.0004 under a step": ("--final-height", 29.0996),
+            "the last pass 0.0004 under a step": ("--final-height", 29.1996, "--finish-depth", 0),
+            "steps a hair under 0.2": ("--pass-depth", 0.19999, "--finish-depth", 0),
+        }
+        for what, args in cases.items():
+            with self.subTest(what):
+                _, program = self.generate(*args)
+                written = levels(program)
+                self.assertEqual(len(written), len(set(written)), written)
+
+    def test_counts_only_the_passes_it_cuts(self):
+        self.probe(HIGH_LAST)
+        r, program = self.generate("--top-margin", 1)  # the first levels are above the top: nothing to cut
+        n = len(levels(program))
+        self.assertIn(f"wrote {self.tmp / 'job.nc'} ({n} passes", r.stdout)
+        self.assertEqual(re.findall(r"Cuts Z(\S+) -> Z-4 in (\d+) passes", program), [(f"{levels(program)[0]:g}", str(n))])
+        self.assertEqual(re.findall(r"^; Level (\d+)/(\d+)", program, re.M), [(str(k), str(n)) for k in range(1, n + 1)])
 
     def test_skipping_air_saves_time_on_a_sloped_top(self):
         self.probe(tilted(self.points()))
@@ -291,6 +335,17 @@ class SurfaceToLowestPoint(unittest.TestCase):
         self.probe(FENCED, fence=True)
         _, program = self.generate("--final-height", 29.5)
         self.assertAlmostEqual(levels(program)[-1], -2.8, places=3)
+
+    def test_tool_flute_length_goes_in_the_header(self):
+        self.probe(HIGH_LAST)
+        (self.tmp / "tools.json").write_text(json.dumps({"data": [{
+            "type": "flat end mill", "unit": "millimeters", "description": "Test 1/8 Flat",
+            "geometry": {"DC": 3.175, "SFDM": 3.175, "NOF": 2, "LCF": 19, "OAL": 38},
+            "start-values": {"presets": [{"name": "Aluminum", "n": 12000, "v_f": 500, "v_f_plunge": 200, "stepdown": 0.2}]},
+        }]}))
+        self.machine.env["Z1_TOOLS"] = str(self.tmp / "tools.json")
+        _, program = self.generate("--tool", "Test 1/8 Flat")
+        self.assertIn("|shoulderlength=19|flutelength=19|", program)
 
     def test_rejects_bad_values(self):
         self.probe(HIGH_LAST)

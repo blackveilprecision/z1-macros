@@ -75,10 +75,7 @@ class Tool:
 
 def load_library(path):
     """A Fusion tool library: an exported .tools file (zipped JSON) or a local library's .json."""
-    if zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as z:
-            return json.loads(z.read(next(n for n in z.namelist() if n.endswith(".json"))))
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    return load_library_bytes(Path(path).read_bytes())
 
 
 def references():
@@ -86,13 +83,18 @@ def references():
 
 
 def fetch(force=False, quiet=False):
-    """Download Makera's tool files listed in makera.json into cache/. Returns the files there."""
+    """Download Makera's tool files listed in makera.json into cache/. Returns the files there.
+
+    cache/COMMIT says which commit they came from; when makera.json moves to another, they're downloaded again.
+    """
     ref = references()
     CACHE.mkdir(exist_ok=True)
-    out = []
+    stamp = CACHE / "COMMIT"
+    stale = force or not stamp.exists() or stamp.read_text(encoding="utf-8").strip() != ref["commit"]
+    out, failed = [], False
     for name in ref["libraries"]:
         path = CACHE / name
-        if force or not path.exists():
+        if stale or not path.exists():
             url = "https://raw.githubusercontent.com/{}/{}/{}".format(
                 ref["repo"], ref["commit"], urllib.parse.quote(f"{ref['folder']}/{name}")
             )
@@ -104,17 +106,25 @@ def fetch(force=False, quiet=False):
                 load_library_bytes(data)  # don't keep anything that isn't a tool library
                 path.write_bytes(data)
             except (urllib.error.URLError, OSError, ValueError) as e:
-                print(f"toollib: couldn't download {name} ({e}); continuing without it", file=sys.stderr)
-                continue
+                failed = True
+                keep = "using the copy in cache/" if path.exists() else "continuing without it"
+                print(f"toollib: couldn't download {name} ({e}); {keep}", file=sys.stderr)
+                if not path.exists():
+                    continue
         out.append(path)
+    if stale and not failed:
+        stamp.write_text(ref["commit"] + "\n", encoding="utf-8")
     return out
 
 
 def load_library_bytes(data):
     if zipfile.is_zipfile(io.BytesIO(data)):
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            return json.loads(z.read(next(n for n in z.namelist() if n.endswith(".json"))))
-    return json.loads(data)
+            data = z.read(next(n for n in z.namelist() if n.endswith(".json")))
+    library = json.loads(data)  # UTF-8, with or without a BOM; anything else is a ValueError
+    if not isinstance(library, dict) or not isinstance(library.get("data", []), list):
+        raise ValueError("not a Fusion tool library")
+    return library
 
 
 def library_files():
@@ -179,23 +189,25 @@ def find(text):
     raise SystemExit(f"toollib: {len(matches)} tools match {text!r}: {names}. Be more specific")
 
 
-def apply(v, name, material, argv=None):
-    """Set a macro's cutter settings in v from tool `name` and its `material` preset.
+def apply(v, tool, material, given=frozenset()):
+    """Set a macro's cutter settings in v from `tool` (a Tool, or a name for find()) and its `material` preset.
 
-    tool_dia, rpm, feed, plunge_feed, pass_depth and stepover (STEPOVER of the
-    diameter) are set unless they were given on the command line (argv), and only
-    the ones v has. Returns (tool, preset).
+    tool_dia, rpm, feed, plunge_feed, pass_depth, flute_length and stepover (STEPOVER
+    of tool_dia, the user's if they gave one) are set, only the ones v has, unless
+    they're in `given`, the settings the user gave (args.given from cli.add_variables()).
+    Returns (tool, preset).
     """
-    tool = find(name)
+    tool = find(tool) if isinstance(tool, str) else tool
     preset = tool.preset(material)
-    given = {a[2:].split("=")[0].replace("-", "_") for a in (sys.argv[1:] if argv is None else argv) if a.startswith("--")}
     values = {
-        "tool_dia": tool.dia, "rpm": round(preset.rpm), "feed": round(preset.feed),
-        "plunge_feed": round(preset.plunge_feed), "pass_depth": preset.stepdown, "stepover": round(STEPOVER * tool.dia, 3),
+        "tool_dia": tool.dia, "rpm": round(preset.rpm), "feed": round(preset.feed), "plunge_feed": round(preset.plunge_feed),
+        "pass_depth": preset.stepdown, "flute_length": tool.flute_length or None,  # 0 when the library has no LCF
     }
     for key, value in values.items():
         if key in v and key not in given and value is not None:
             v[key] = type(v[key])(value)
+    if "stepover" in v and "stepover" not in given:
+        v["stepover"] = type(v["stepover"])(round(STEPOVER * v.get("tool_dia", tool.dia), 3))
     return tool, preset
 
 

@@ -124,7 +124,10 @@ class Machine:
         return run(script, *args, env=self.env)
 
     def play(self, job, prints=(), end=("finish",)):
-        """Upload a job and run it: it prints `prints`, then finishes (or ends with another event, or None)."""
+        """Upload a job and run it: it prints `prints`, then finishes (or ends with another event, or None).
+        A file without G28 never logs finishing, as on the machine."""
+        if end == ("finish",) and not re.search(r"^G28\b", Path(job).read_text(), re.M):
+            end = None
         self.log(("upload", job), ("play", Path(job).name, list(prints)), *([end] if end else []))
 
     def probe(self, *args, prints, save=True):

@@ -13,5 +13,6 @@
 
 - [ ] `python3 -m unittest discover -s tests` passes, with tests for what changed
 - [ ] The macro's README covers the change
-- [ ] Python standard library only; no generated files (`.nc`, tool files) committed
+- [ ] Python standard library only; no generated `.nc` files or Makera's downloaded tool files (`tool-library/cache/`) committed; new tools go in `tool-library/custom/`
+- [ ] Code another macro already has is imported from `shared/`, not copied
 - [ ] New macro: its own folder with a README, a row in the root README table, and an entry in `.github/ISSUE_TEMPLATE/bug_report.yml`

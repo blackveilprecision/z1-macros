@@ -25,7 +25,7 @@ Don't go by Carvera documentation or the Carvera Community Firmware: the communi
 
 - Emit `G21`. `G20` converts X/Y/Z/I/J/K/F on G0-G3, G10 and G92 (`Robot::to_millimeters`), but not G38 distances or feeds, and never A.
 - `F` on a `G0` sets the rapid rate for every later `G0` (`Robot::process_move` stores it as `seek_rate`). Keep F off G0.
-- The firmware doesn't reject a high F; the planner clamps it to per-axis limits in the machine's config, which isn't public. Studio's limits for the Z1 are 1200 mm/min and 13000 rpm (table `t_MachineType` in `~/Library/Application Support/MakeraStudio/makera_library.db`). The generators' `MAX_FEED`/`MAX_RPM` come from there.
+- The firmware doesn't reject a high F; the planner clamps it to per-axis limits in the machine's config, which isn't public. Studio's limits for the Z1 are 1200 mm/min and 13000 rpm (table `t_MachineType` in `~/Library/Application Support/MakeraStudio/makera_library.db`). `MAX_FEED`/`MAX_RPM` in `shared/z1.py` come from there.
 - `G2`/`G3` take `I`/`J`/`K` (`Robot::compute_arc`, planes G17/G18/G19). There is no `R` form: without I/J/K the radius is 0 and no XY move happens (read from the code, not run).
 - `G53` applies only to the G0/G1 on the same line: `G53 G0 Z-3`.
 - Canned cycles (`tools/drillingcycles`) load only if the machine's config sets `drillingcycles.enable` (default off; unverified on the Z1) and run only after `G98`/`G99`. Without them `G81` does nothing and the following bare `X.. Y..` lines become G0/G1 moves. Write drilling as G0/G1.
@@ -63,17 +63,17 @@ Studio's runs log no per-line replies: `Player::on_main_loop` gives each file li
 ## What Studio adds around your file
 
 - Before the first line Studio sends `buffer M495 X<x> Y<y> P1`, "Goto path origin first": `G53 G0 Z-3`, then `G90 G0 X<x> Y<y>` in work coordinates. In the logged runs X/Y were the low corner of Studio's preview of the file (0, 0 for files with no cutting moves). Its preview reads `G38.2` X/Y as positions: a file with `G38.2 X-20` and `G38.2 Y-20` got `M495 X-20Y-20P1` and halted on `Soft Endstop Y was exceeded` before its first line (logged 2026-10-06). Keep probe searches short toward the machine's limits and write them after `G91` (the firmware takes G38 as relative anyway; whether Studio's preview then reads them as relative is unverified). With Studio's Z probe or auto leveling ticked, the M495 carries `O F` or `A B I J H` and probes before your first line.
-- `;@MKR|...` lines are Studio's export header (machine, material, stock, origin, tools, max feed, time, toolpaths). The firmware sees comments; Studio uses them for its preview and tool list. Copy the block in `build()` of `surface-stock/surface-stock.py`. Which fields Studio requires is untested.
+- `;@MKR|...` lines are Studio's export header (machine, material, stock, origin, tools, max feed, time, toolpaths). The firmware sees comments; Studio uses them for its preview and tool list. `start()` in `shared/z1.py` writes it for every cutting macro. Which fields Studio requires is untested.
 
 ## Patterns that work without variables
 
 Read these in the repo rather than re-deriving them:
 
-- **Z0 only moves up**: `probe_block()` in `surface-stock/surface-stock.py`. Probe the first point Studio's way and set Z0. At each later point lift `probe_clearance` above the current Z0, `G38.3` down exactly that far (it stops on a higher surface, or at Z0), then `G10 L20 P0 Z0`. Z0 ends on the highest point. Ran on a Z1 Pro, firmware 1.1.2.
+- **Z0 only moves up**: `probe_block()` in `surface-stock/surface-stock.py`. Probe the first point Studio's way (`z_probe()` in `shared/z1.py`) and set Z0. At each later point lift `probe_clearance` above the current Z0, `G38.3` down exactly that far (it stops on a higher surface, or at Z0), then `G10 L20 P0 Z0`. Z0 ends on the highest point. Ran on a Z1 Pro, firmware 1.1.2.
 - **Measure, log, generate**: `probe-stock/`. Its job sets Z0 (or X0/Y0 for side touches) on every point with `G38.2` and prints it with `M498`; `save` reads the values back from Studio's log (`stockref.read_logs()`) into `stock.json`, as heights above the tool setter (G54 Z minus REFMZ). Macros such as `surface-to-lowest-point/` do the math from that and write the next job.
-- **Plunge beside the stock**: `raster()` and `build()` start each level off the stock and cut across; tests check it with `plunges_over_stock()` in `tests/helpers.py`.
-- **Studio's dialect**: header, `G90 G21`, `M370`, probing, `T1 M6`, `M7`, `G0 X Y`, `S<rpm> M3`, `G0 Z15`, passes, `G0 Z15`, `M9`, `M05`, `G28`, `M02`.
-- **Tests read the G-code, not the machine**: `tests/helpers.py` (`run`, `moves`, `levels`, `footprint`, `plunges_over_stock`); one `tests/test_<macro>.py` per macro.
+- **Plunge beside the stock**: `raster()` in `shared/toolpath.py` and the macros' `build()` start each level off the stock and cut across; tests check it with `plunges_over_stock()` in `tests/helpers.py`.
+- **Studio's dialect**: header, `G90 G21`, `M370`, probing, `T1 M6`, `M7`, `G0 X Y`, `S<rpm> M3`, `G0 Z15`, passes, `G0 Z15`, `M9`, `M05`, `G28`, `M02`: `start()`, then `face()` or `spindle_on()`, `cut()` and `end()`, in `shared/z1.py`.
+- **Tests read the G-code, not the machine**: `tests/helpers.py` (`run`, `moves`, `levels`, `footprint`, `plunges_over_stock`); one `tests/test_<macro>.py` per macro, and `tests/test_shared.py` for `shared/`.
 
 ## Reviewing a Z1 job
 

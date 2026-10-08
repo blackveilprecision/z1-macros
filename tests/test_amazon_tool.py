@@ -210,12 +210,62 @@ class AmazonTool(unittest.TestCase):
 
     def test_default_output_goes_into_the_tool_library(self):
         (self.tmp / "amazon-tool").mkdir()
+        (self.tmp / "tool-library").mkdir()
         script = self.tmp / "amazon-tool" / "amazon-tool.py"
         shutil.copy(SCRIPT, script)
+        shutil.copy(ROOT / "tool-library" / "toollib.py", self.tmp / "tool-library")  # what the script imports
+        shutil.copytree(ROOT / "shared", self.tmp / "shared")
         r, _ = self.generate(FLAT, script=script, out=False)
         self.assertEqual(r.returncode, 0, r.stderr)
         custom = self.tmp / "tool-library" / "custom"
-        self.assertTrue((custom / "WEXWE 1-8in 4 Flute End Mill (MAH Coated).json").exists(), list(custom.iterdir()))
+        written = custom / "WEXWE 1-8in 4 Flute End Mill (MAH Coated).json"
+        self.assertTrue(written.exists(), list(custom.iterdir()))
+        # a second tool by the same name (or the same one again) doesn't replace it, or your edits to it
+        written.write_text("edited")
+        r, _ = self.generate(FLAT, script=script, out=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("is already there; pass --description", r.stderr)
+        self.assertEqual(written.read_text(), "edited")
+        r, _ = self.generate(FLAT, "--description", "WEXWE 1/8 x 2", script=script, out=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((custom / "WEXWE 1-8 x 2.json").exists())
+
+    def test_spec_inches_that_could_be_metric(self):
+        # 0.16 inches is 5/32" or 4 mm, 0.12 inches 1/8" or 3 mm: neither is picked
+        for spec, mm, either in (("0.16 inches", 4.064, '5/32" or 4 mm'), ("0.12 inches", 3.048, '1/8" or 3 mm')):
+            with self.subTest(spec=spec):
+                page = listing(
+                    "2 Flute Carbide End Mill, 4mm Shank, 12mm Cutting Length, 50mm Overall Length",
+                    rows={"Cutting Diameter": spec, "Brand Name": "Metric", "ASIN": "B0TESTMETR"},
+                )
+                r, tool = self.generate(page)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertGeometry(tool, DC=mm)
+                self.assertIn(f'spec "cutting diameter: {spec}" is {either} rounded; using {mm:g} mm as read: pass --dia', r.stdout)
+        r, tool = self.generate(FLAT)
+        self.assertNotIn("rounded;", r.stdout, '0.13 inches is only 1/8"')
+
+    def test_skips_files_that_arent_tool_libraries(self):
+        home = self.tmp / "home"  # where Z1_TOOLS points
+        (home / "latin-1.json").write_bytes('{"data": [], "description": "Fräse"}'.encode("latin-1"))
+        (home / "list.json").write_text("[1, 2]")
+        r, _ = self.generate(FLAT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.library.write_text("[1, 2]")
+        r, _ = self.generate(FLAT)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("can't read the Fusion library", r.stderr)
+
+    def test_refuses_impossible_values(self):
+        for args, message in (
+            (("--number", 0), "--number must be 1-999"), (("--number", 9999), "--number must be 1-999"),
+            (("--flutes", 0), "--flutes must be at least 1"), (("--dia", -3), "--dia must be positive"),
+            (("--shank-dia", 0), "--shank-dia must be positive"), (("--tip-dia", -1), "--tip-dia can't be negative"),
+        ):
+            with self.subTest(args=args):
+                r, _ = self.generate(FLAT, *args)
+                self.assertEqual(r.returncode, 2)
+                self.assertIn(message, r.stderr)
 
     def test_size_name_with_words_in_front(self):
         # Shaped like WEXWE B0CXPD9ZWG: the flute length is only in the photos

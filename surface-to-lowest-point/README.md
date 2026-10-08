@@ -8,6 +8,7 @@ Use [surface-stock](../surface-stock) instead when you already know how deep to 
 
 - Makera Z1 or Z1 Pro (firmware 1.1.2), Makera Studio and the probe
 - Python 3, no packages, on the computer running Studio (it reads Studio's log)
+- Run it from a copy of this whole repo: it imports [../shared](../shared) and [stockref](../probe-stock)
 - A probe run saved by [probe-stock](../probe-stock), ideally with the anchor plate touched, so the thickness is measured instead of taken from calipers
 
 ## Use
@@ -41,7 +42,7 @@ Use [surface-stock](../surface-stock) instead when you already know how deep to 
 
    It also prints the Z0 the job will cut from (see [Z0](#z0)), and stops instead if anything in the log could have moved Z0 since it was last printed.
 
-3. Upload `surface-to-lowest-point.nc` and start it with **Auto leveling off**, before doing anything else that could move Z0. It prints Z0, asks for the cutter (T1), measures it, and faces down to the final thickness. Before you confirm the tool change, check that Studio's log shows the `G54` Z the script printed; stop the job if it doesn't. If the cutter is already in, there's no tool change: check the log before the first pass.
+3. Upload `surface-to-lowest-point.nc` and start it with **Auto leveling off**, before doing anything else that could move Z0, and with the probe or no tool in the spindle. It prints Z0, asks for the cutter (T1), measures it, and faces down to the final thickness. Before you confirm the tool change, check that Studio's log shows the `G54` Z the script printed; stop the job if it doesn't. The tool change is the job's only stop: with T1 already in, `T1 M6` does nothing and the cutter goes in seconds after Z0 is printed, too soon to check it.
 
 Once Studio's log shows the job finished, probe-stock counts the top as faced at that thickness. Running the script again then says there's nothing left to cut, unless you pass a lower `--final-height`.
 
@@ -60,8 +61,9 @@ Once Studio's log shows the job finished, probe-stock counts the top as faced at
 | `--top-margin` | 0.2 | First pass starts this far above the highest point |
 | `--rpm` / `--feed` / `--plunge-feed` | 12000 / 500 / 200 | Makera's 6061 values for a 3.175 mm metal end mill |
 | `--tool` / `--material` | | Take the cutter, feeds and speeds from a tool in [tool-library](../tool-library) and its preset for that material (default Aluminum); options you pass still win |
+| `-o` / `--out` | `surface-to-lowest-point.nc` here | Where to write the job |
 
-The stock's size, origin corner and thickness come from the probe run.
+The stock's size, origin corner and thickness come from the probe run. Where probe-stock touched a side with the rod and found it past the size typed for the probe job, the passes reach out to that side instead.
 
 ## Passes cut only where there's material
 
@@ -75,12 +77,12 @@ Each pass is one zig-zag at cutting depth. It goes down beyond the stock's front
 
 The facing job doesn't probe, and it doesn't set Z0: it cuts from the Z0 in the machine, and the script raises every Z by how far the highest point is above it. probe-stock keeps every height above the tool setter, so the script only needs to know where Z0 is now: the last `M498` in Studio's log shows it. After the probe job that is its last top point. A tool change doesn't move Z0; the new tool is measured against the probe. Anything after the last print that could move Z0 without printing it, a G10 Studio sent (its own Z probe, for one) or a job not written here, stops the script; [probe-stock's where job](../probe-stock#how-the-numbers-are-kept) prints it again.
 
-Setting Z0 in the job with a `G10` would be worse: on the Z1 a `G10` that sets Z also makes whatever tool is in the spindle the reference tool (`Robot::on_gcode_received`), which is only right if the probe is still in. Leaving Z0 alone works whether the probe or the cutter is in when the job starts, and writes nothing to the EEPROM. The job prints Z0 (`M498`) before the tool change so you can check it.
+Setting Z0 in the job with a `G10` would be worse: on the Z1 a `G10` that sets Z also makes whatever tool is in the spindle the reference tool (`Robot::on_gcode_received`), which is only right if the probe is still in. Leaving Z0 alone works whether the probe or the cutter is in when the job starts, and doesn't write G54 to the EEPROM. The job prints Z0 (`M498`) before the tool change so you can check it while the tool change waits; that's why the cutter mustn't already be in.
 
 ## Notes
 
 - The lowest point between probe points, or in the strip outside them, can be lower than any probed one; the round-down usually covers that.
-- Cutting along Y, passes run past the front and back edges by the tool radius plus 2 mm, and past the left and right edges by the tool radius, down to the final thickness (the other way round with `--cut-along x`). Clamps there must sit below it; Makera's anchor plate is 5 mm high.
-- The job writes nothing to the machine's EEPROM. Never use `M498.2`; it erases that data. The job never moves the A axis or uses G92.
+- Cutting along Y, the cutter reaches its diameter plus 2 mm past the front and back edges (5.2 mm with the 3.175 mm cutter: it goes down with its edge 2 mm clear) and its radius past the left and right edges (1.6 mm), down to the final thickness. With `--cut-along x` it's the other way round: diameter plus 2 mm past the left and right, radius past the front and back. Clamps within that must sit below the final thickness; the script prints the distances for the cutter it used. Makera's anchor plate is 5 mm high.
+- The job sets no Z0 or work offset (no `G10`), so G54 isn't written; the tool change (`T1 M6`) stores the tool number and its measured length, as any tool change does. It never uses `M498.2`, which erases that data, or G92, and never moves the A axis.
 
 On 2026-10-06 a Z1 Pro (firmware 1.1.2) ran this facing job, from a second probe run of the same stock at 19:32 and with `--air-margin 0.4`: 16 passes along Y in 47.5 minutes, with no alarms, and calipers then read 29.0 mm across the whole top. That version of the script read the probe run from Studio's log itself; reading it through probe-stock is new and hasn't run on a machine yet. The passes are the same.
