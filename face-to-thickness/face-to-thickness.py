@@ -25,7 +25,7 @@ from pathlib import Path
 # --- VARIABLES (dimensions are POSITIVE values) ---
 VARIABLES = {
     "stock_width": 69.0,    # X-axis dimension of stock
-    "stock_length": 50.1,   # Y-axis dimension of stock
+    "stock_length": 50.4,   # Y-axis dimension of stock
     "stock_height": 17.0,   # Thickness now; measure it, the cut depth is worked out from it
     "final_height": 10.0,   # Thickness to leave
     "tool_dia": 3.175,      # Diameter of your facing bit (the included collet is 1/8")

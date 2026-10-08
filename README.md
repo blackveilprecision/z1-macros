@@ -6,9 +6,11 @@ G-code macros and generators for the Makera Z1 desktop CNC, run from Makera Stud
 
 | Folder | What it does |
 |---|---|
+| [probe-stock](probe-stock) | Probes the stock once (top, sides, bed) for the macros that cut from it |
 | [surface-stock](surface-stock) | Probes uneven stock and faces it flat |
-| [surface-to-lowest-point](surface-to-lowest-point) | Probes uneven stock, then faces it down to its lowest point |
+| [surface-to-lowest-point](surface-to-lowest-point) | Faces uneven stock down to its lowest point, from probe-stock's reference |
 | [face-to-thickness](face-to-thickness) | Faces flat stock down to a set thickness |
+| [square-side](square-side) | Cuts the uneven side straight, half the height at a time, from probe-stock's reference |
 | [amazon-tool](amazon-tool) | Turns an Amazon cutter listing into a Fusion tool library file |
 | [tool-library](tool-library) | Cutters by name for the macros (`--tool`): our own, Makera's and Fusion's |
 

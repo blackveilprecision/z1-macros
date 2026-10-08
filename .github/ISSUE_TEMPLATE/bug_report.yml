@@ -11,9 +11,11 @@ body:
     attributes:
       label: Macro or script
       options:
+        - probe-stock
         - surface-stock
         - surface-to-lowest-point
         - face-to-thickness
+        - square-side
         - amazon-tool
         - tool-library
         - Something else

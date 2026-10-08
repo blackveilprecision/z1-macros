@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Cut the uneven side of the stock straight, half its height at a time, on the Makera Z1.
+
+It works from probe-stock's reference (../probe-stock): the side across from the
+origin in X (the right side for a left origin), touched with the probe rod. It
+cuts that side to the narrowest width probed, rounded down to round_to, from
+the top down to about half the stock's thickness: roughing in layers from the
+top that leave finish_allowance on the wall, then one full-depth finishing pass
+that climbs along the side. Clamps beside the side stay below the cut.
+
+Then flip the stock front to back, push it into the same corner, probe it again
+with probe-stock and run this again: it cuts the other half to the same width,
+and the two overlap by `overlap`.
+
+Edit VARIABLES below (or pass flags, see --help), upload the .nc to the Z1
+from Makera Studio and start it with Auto leveling OFF.
+"""
+
+import argparse
+import math
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "probe-stock"))
+import stockref  # noqa: E402
+from stockref import ORIGINS, fmt  # noqa: E402
+
+# --- VARIABLES (dimensions are POSITIVE values; the stock's come from probe-stock) ---
+VARIABLES = {
+    "final_width": 0.0,       # Width to leave, from the origin's side; 0 = the narrowest probed, rounded down to round_to
+    "round_to": 0.5,          # Round the narrowest probed width down to a multiple of this
+    "depth": 0.0,             # How far down the side to cut; 0 = half the thickness plus half of overlap
+    "overlap": 1.0,           # The cuts before and after flipping overlap this much
+    "tool_dia": 6.35,         # WEXWE 1/4" 3 flute (tool-library); --tool takes it and its feeds from there
+    "flute_length": 25.4,     # The finishing pass cuts with the flutes the whole depth down
+    "pass_depth": 0.2,        # Depth of each roughing layer
+    "stepover": 4.0,          # Most material across one roughing pass takes; more is taken in several
+    "finish_allowance": 0.2,  # Roughing stops this far outside the final width; one full-depth pass takes it
+    "rpm": 12000,
+    "feed": 500,              # mm/min, roughing and finishing
+    "plunge_feed": 200,       # mm/min; plunges happen off the stock
+    "clamp_height": 10.0,     # Tallest clamp beside the side, above the bed; the cutter stays CLAMP_CLEARANCE above it
+}
+
+SAFE_Z = 15.0          # Retract height above the top, same as Studio's exports
+APPROACH = 3.0         # Rapid down to this far above the top before plunging
+LEAD = 2.0             # Cutter edge clearance past the front and back of the stock
+CLAMP_CLEARANCE = 2.0
+ANCHOR_HEIGHT = 5.0    # Makera's anchor plate, which the cutter passes over at the front
+AIR_MARGIN = 0.3       # Allowance for the side between the probed points when counting roughing passes
+STICK_OUT = 5.0        # The cutter has to stick out of the collet the depth plus this
+TIP_SLACK = stockref.TIP_SLACK  # The rod's tip and the cut's bottom may be this far apart; see plan()
+MAX_FEED = 1200        # Z1 limits from Studio's machine table
+MAX_RPM = 13000
+JOB = "square-side.nc"
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    for name, default in VARIABLES.items():
+        p.add_argument("--" + name.replace("_", "-"), type=type(default), default=default)
+    p.add_argument("--log", type=Path, default=stockref.STUDIO_LOGS, help="Studio's log folder or one log file (default: %(default)s)")
+    p.add_argument("--tool", help="take tool_dia, flute_length, rpm, feeds, pass_depth and stepover from this tool in"
+                   " ../tool-library (see tool-library/toollib.py list); options you pass still win")
+    p.add_argument("--material", default="Aluminum", help="which of the tool's presets to use (default: Aluminum)")
+    p.add_argument("-o", "--out", type=Path)
+    return p.parse_args()
+
+
+def check(v):
+    errors = []
+    for name in ("round_to", "tool_dia", "flute_length", "pass_depth", "stepover"):
+        if v[name] <= 0:
+            errors.append(f"{name} must be positive")
+    for name in ("final_width", "depth", "overlap", "finish_allowance", "clamp_height"):
+        if v[name] < 0:
+            errors.append(f"{name} can't be negative")
+    if v["stepover"] >= v["tool_dia"]:
+        errors.append("stepover must be smaller than tool_dia")
+    if v["finish_allowance"] >= v["stepover"]:
+        errors.append("finish_allowance must be smaller than stepover")
+    if not 0 < v["feed"] <= MAX_FEED or not 0 < v["plunge_feed"] <= MAX_FEED:
+        errors.append(f"feeds must be between 0 and {MAX_FEED} mm/min")
+    if not 0 < v["rpm"] <= MAX_RPM:
+        errors.append(f"rpm must be between 0 and {MAX_RPM}")
+    if errors:
+        raise SystemExit("square-side: " + "; ".join(errors))
+
+
+def plan(v, state):
+    """The cut from the stock as it is now: widths along the side, the width to leave, and the Zs.
+
+    Returns (rows, final, thickness, z_top, z_bottom, roughing offsets, sign): rows are (Y, width,
+    tip above the bed) for each probed point; Zs are in the job's coordinates (from Z0 now); each
+    roughing offset is how far outside the final width a pass leaves the side; sign is +1 when the
+    side is on the right of the origin, -1 on the left.
+    """
+    ox, oy = ORIGINS[state.origin]
+    if ox == 0.5:
+        raise SystemExit("square-side: the stock was probed from its center; it needs a corner origin")
+    sides = state.faces.get("x") or []
+    if not sides:
+        raise SystemExit(
+            "square-side: the reference has no side touches. Probe it with the rod first, for example"
+            " ../probe-stock/probe-stock.py job --corner --side-x-points 5, then save it"
+        )
+    rows = []
+    for t, tip, u in sides:
+        x, y = state.program(u, t)
+        rows.append((y, abs(x), tip - state.bed))
+    narrowest = min(w for _, w, _ in rows)
+    final = v["final_width"] or math.floor(narrowest / v["round_to"] + 1e-9) * v["round_to"]
+    widest = max(w for _, w, _ in rows)
+    if final >= widest:
+        raise SystemExit(f"square-side: the side is {widest:.3f} wide at most; a final width of {fmt(final)} cuts nothing")
+
+    top = max(h for _, _, h in state.top)
+    thickness = top - state.bed
+    depth = v["depth"] or thickness / 2 + v["overlap"] / 2
+    if depth >= thickness:
+        raise SystemExit(f"square-side: depth {fmt(depth)} is the whole {thickness:.2f} mm thickness")
+    lowest = thickness - depth
+    floor = max(v["clamp_height"], ANCHOR_HEIGHT) + CLAMP_CLEARANCE
+    if lowest < floor - 1e-9:
+        raise SystemExit(
+            f"square-side: cutting {fmt(depth)} down leaves the cutter {lowest:.2f} mm above the bed, under"
+            f" {fmt(floor)}: {fmt(CLAMP_CLEARANCE)} mm above the {fmt(max(v['clamp_height'], ANCHOR_HEIGHT))} mm"
+            " clamps it passes over. Cut less deep (--depth), and flip the stock to cut the rest"
+        )
+    if depth > v["flute_length"] - 1:
+        raise SystemExit(
+            f"square-side: the finishing pass cuts {fmt(depth)} mm down the side, more than the"
+            f" {fmt(v['flute_length'])} mm flutes allow; cut less deep (--depth) or use a longer cutter"
+        )
+    excess = widest - final + AIR_MARGIN - v["finish_allowance"]
+    n = max(1, math.ceil(excess / v["stepover"] - 1e-9))
+    offsets = [v["finish_allowance"] + excess * (n - 1 - k) / n for k in range(n)]
+    z_top = top - state.z0
+    return rows, final, thickness, z_top, z_top - depth, offsets, 1.0 if ox == 0 else -1.0
+
+
+def layers(v, z_top, z_bottom):
+    n = math.ceil((z_top - z_bottom) / v["pass_depth"] - 1e-9)
+    return [z_top - (z_top - z_bottom) * k / n for k in range(1, n + 1)]
+
+
+def build(v, state, note, final, z_top, z_bottom, offsets, sign):
+    """The job: roughing layers that zig-zag along the side, then one full-depth finishing pass that climbs.
+
+    Every pass starts and ends beyond the front or back of the stock, so the cutter
+    only goes down where there's nothing under it and meets the side from the end.
+    """
+    ox, oy = ORIGINS[state.origin]
+    r = v["tool_dia"] / 2
+    y0, y1 = -oy * state.length - r - LEAD, (1 - oy) * state.length + r + LEAD
+    x_at = lambda offset: sign * (final + offset + r)  # noqa: E731
+    # Climb milling on a clockwise spindle: along +Y with the side to the cutter's left (-X), -Y to its right
+    climb = (y0, y1) if sign > 0 else (y1, y0)
+    zs = layers(v, z_top, z_bottom)
+    safe_z, approach = z_top + SAFE_Z, z_top + APPROACH
+
+    body, seconds = [], 0.0
+    at_y = y0
+    body += [f"G0 X{fmt(x_at(offsets[0]))} Y{fmt(at_y)}", f"S{v['rpm']} M3", f"G0 Z{fmt(safe_z)}", f"G0 Z{fmt(approach)}"]
+    z_prev = approach
+    for n, z in enumerate(zs, 1):
+        body.append(f"; Layer {n}/{len(zs)} Z{fmt(z)}")
+        body.append(f"G1 Z{fmt(z)} F{v['plunge_feed']}")
+        seconds += abs(z_prev - z) / v["plunge_feed"] * 60
+        for k, offset in enumerate(offsets):
+            if k:  # step in to the next pass at the end, beyond the stock
+                body.append(f"G1 X{fmt(x_at(offset))} F{v['feed']}")
+                seconds += abs(offsets[k - 1] - offset) / v["feed"] * 60
+            at_y = y1 if at_y == y0 else y0
+            body.append(f"G1 Y{fmt(at_y)} F{v['feed']}")
+            seconds += (y1 - y0) / v["feed"] * 60
+        if len(offsets) > 1 and n < len(zs):  # back out to the first pass for the next layer
+            body.append(f"G1 X{fmt(x_at(offsets[0]))} F{v['feed']}")
+        z_prev = z
+
+    body.append("; Finishing pass, the full depth, climbing")
+    body += [f"G0 Z{fmt(approach)}", f"G0 X{fmt(x_at(0))} Y{fmt(climb[0])}", f"G1 Z{fmt(z_bottom)} F{v['plunge_feed']}",
+             f"G1 Y{fmt(climb[1])} F{v['feed']}"]
+    seconds += (approach - z_bottom) / v["plunge_feed"] * 60 + (y1 - y0) / v["feed"] * 60 + (y1 - y0) / MAX_FEED * 60
+    body += [f"G0 Z{fmt(safe_z)}", "M9", "M05", "G28", "M02"]
+
+    w, l, d = state.width, state.length, v["tool_dia"]
+    thickness = z_top + state.z0 - state.bed
+    header = [
+        ";@MKR|BEGIN",
+        ";@MKR|SCHEMA|v=1.0.0",
+        ";@MKR|MACHINE|id=Z1|name=Makera Z1",
+        ";@MKR|MATERIAL|id=|name3=other|name1=Aluminum Alloys|name2=6061 Aluminum|uuid1=019bfadc-e599-74ef-b4ba-f34413e6f231",
+        f";@MKR|STOCK|id=cuboid|length={fmt(w)}|width={fmt(l)}|height={fmt(thickness)}|diameter=50",
+        f";@MKR|ORIGIN|id=0|type_name={state.origin}|x={fmt((ox - 0.5) * w)}|y={fmt((oy - 0.5) * l)}|z={fmt(thickness / 2)}",
+        ";@MKR|CAM|id=square-side|name=square-side.py|v=1.0.0",
+        ";@MKR|UNIT|value=mm",
+        f";@MKR|MAXFEEDRATE|value={MAX_FEED}",
+        f";@MKR|TOOL|number=1|id=|name={fmt(d)}mm Flat End|type=Flat End|handlediameter={fmt(d)}|sticklength=0"
+        f"|shoulderlength={fmt(v['flute_length'])}|flutelength={fmt(v['flute_length'])}|diameter={fmt(d)}|tipdiameter={fmt(d)}"
+        "|cornerradius=0|angle=0|halfAngle=0",
+        f";@MKR|TIME|seconds={round(seconds)}",
+        ";@MKR|TOOLPATH|number=1|tool_number=1|name=[T1]Square Side",
+        ";@MKR|END",
+        "",
+        "; Generated by square-side.py (github.com/blackveilprecision/z1-macros) - edit the script, not this file.",
+        f"; {note}",
+        f"; No probing: Z0 stays where it is, G54 Z {state.machine.z:.3f}. Turn auto-leveling OFF.",
+        f"; {len(zs)} roughing layers of <= {fmt(v['pass_depth'])} mm, {len(offsets)} pass(es) each, leaving"
+        f" {fmt(v['finish_allowance'])} mm; then one full-depth finishing pass. Every pass starts beyond the stock.",
+        "",
+        "G90 G21",
+        ";@MKR|TOOLPATH_START|toolpath_number=1",
+        "",
+        "M370 ; clear any auto-leveling grid left from an earlier job",
+        f"M498 ; G54 Z should read {state.machine.z:.3f}: stop the job if not",
+        "",
+        f"; T1-{fmt(d)}mm Flat End",
+        "",
+        "T1 M6",
+        "M7",
+    ]
+    return "\n".join(header + body) + "\n", len(zs), seconds
+
+
+def main():
+    args = parse_args()
+    v = {name: getattr(args, name) for name in VARIABLES}
+    if args.tool:  # the tool library is only needed with --tool
+        sys.path.insert(0, str(HERE.parent / "tool-library"))
+        import toollib
+
+        tool, preset = toollib.apply(v, args.tool, args.material)
+        if "--flute-length" not in sys.argv and tool.flute_length:
+            v["flute_length"] = tool.flute_length
+        print(
+            f"tool: {tool.description} ({tool.source}), {preset.name}: {fmt(v['tool_dia'])} mm, {fmt(v['flute_length'])} mm"
+            f" flutes, {v['rpm']} rpm, {v['feed']} mm/min, plunge {v['plunge_feed']}, {fmt(v['pass_depth'])} mm layers"
+        )
+    check(v)
+
+    state = stockref.load(args.log)
+    state.check("square-side")
+    rows, final, thickness, z_top, z_bottom, offsets, sign = plan(v, state)
+    side = "right" if sign > 0 else "left"
+    print(f"Probe run {state.probe['stamp']}: the {side} side, touched with the rod (widest from the tip up to the top):")
+    print(f"  {'Y':>7} {'width':>8} {'to cut':>7} {'tip above bed':>14}")
+    for y, width, tip in rows:
+        print(f"  {y:7.1f} {width:8.3f} {width - final:7.3f} {tip:14.3f}")
+    depth = z_top - z_bottom
+    lowest = thickness - depth
+    tip = max(t for _, _, t in rows)
+    if tip > lowest + TIP_SLACK:
+        print(f"The rod touched the side {tip - lowest:.1f} mm above the bottom of the cut. Below its tip the side is taken"
+              f" to be no wider than it read; each {fmt(v['pass_depth'])} mm layer takes whatever is there.")
+    given = "--final-width" if v["final_width"] else f"the narrowest, {min(w for _, w, _ in rows):.3f}, rounded down"
+    print(f"Width to leave: {fmt(final)} mm ({given}).")
+    print(f"Thickness {thickness:.3f} mm: cutting {depth:.2f} mm down from the top, to {lowest:.2f} mm above the bed.")
+    note = (f"The {side} side to {fmt(final)} mm wide, {depth:.2f} mm down from the top ({lowest:.2f} mm above the bed),"
+            f" from the probe run of {state.probe['stamp']}.")
+
+    program, count, seconds = build(v, state, note, final, z_top, z_bottom, offsets, sign)
+    out = args.out or HERE / JOB
+    out.write_text(program)
+    stockref.record(out, "cut", f"{side} side cut to {fmt(final)} mm wide, {depth:.2f} mm down",
+                    effect={"type": "side", "axis": "x", "width": round(final, 3), "bottom": round(z_bottom + state.z0, 3)})
+    print(f"wrote {out} ({count} layers, ~{seconds / 60:.0f} min)")
+    print(f"the cutter has to stick out of the collet more than {fmt(math.ceil(depth + STICK_OUT))} mm;"
+          f" clamps beside the side must be under {lowest - CLAMP_CLEARANCE:.1f} mm")
+    print(f"upload it and start it with Auto leveling off. Before the cutter goes in, Studio's log should show"
+          f" G54 Z {state.machine.z:.3f}: stop the job if not")
+    print("after the first half: flip the stock front to back, push it into the same corner, probe it again"
+          " (probe-stock) and run this again with the same --final-width for the other half")
+
+
+if __name__ == "__main__":
+    main()

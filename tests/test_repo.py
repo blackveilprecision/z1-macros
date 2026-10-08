@@ -7,6 +7,7 @@ import unittest
 
 from helpers import ROOT
 
+OWN = {"toollib", "stockref"}  # the repo's own modules: tool-library and probe-stock
 MACROS = sorted(d for d in ROOT.iterdir() if d.is_dir() and not d.name.startswith(".") and d.name != "tests" and any(d.glob("*.py")))
 
 
@@ -34,7 +35,8 @@ class Repo(unittest.TestCase):
                     names = [node.module]
                 for name in names:
                     with self.subTest(script=script.name, module=name):
-                        self.assertIn(name.split(".")[0], {*sys.stdlib_module_names, "toollib"}, "toollib is the repo's own")
+                        top = name.split(".")[0]
+                        self.assertTrue(top in sys.stdlib_module_names or top in OWN, f"{top} isn't in the standard library")
 
     def test_no_generated_files_are_committed(self):
         try:

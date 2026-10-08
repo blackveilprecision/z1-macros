@@ -17,8 +17,9 @@ Studio's log usually shows what the machine did. On macOS it is in `~/Library/Ap
 - One folder per macro, with a `README.md` covering what it does, requirements, how to run it from Studio, and its limits.
 - Generators are Python 3 using only the standard library. Don't commit generated `.nc` files; add them to the folder's `.gitignore`.
 - Take cutters from [tool-library](tool-library) with `--tool`/`--material`, as the facing macros do: import `toollib` only when `--tool` is given, so the script still runs on its own.
+- To cut from measured stock, read [probe-stock](probe-stock)'s reference rather than probing in each job, as surface-to-lowest-point does: `stockref.load()` gives the stock as it is now and `check()` stops when the origin may have moved; `stockref.record()` notes what the job you wrote does to the stock, so the next macro counts it once Studio's log shows it finished.
 - Keep the root `README.md` table up to date, and add new folders to the macro list in `.github/ISSUE_TEMPLATE/bug_report.yml`.
-- Add tests to `tests/`, one `test_<macro>.py` per macro. `tests/helpers.py` runs a script and reads back the G-code it writes, for checks like "every plunge lands off the stock".
+- Add tests to `tests/`, one `test_<macro>.py` per macro. `tests/helpers.py` runs a script and reads back the G-code it writes, for checks like "every plunge lands off the stock", and `Machine` makes up Studio's log for jobs that read it.
 
 ## Writing G-code for the Z1
 

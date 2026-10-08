@@ -28,7 +28,7 @@ Debug    | 2026-10-04 14:13:28 Sun | :0,  | "[INFO]14:13:28.168 - Normal info: E
 
 ## What a file run looks like
 
-The repo's `surface-to-lowest-point-probe.nc`, with the `Debug    | <date> | :0,  |` prefix, the quotes and the `Normal info: ok` replies left out:
+surface-to-lowest-point's former probe job (now `probe-stock.nc`), with the `Debug    | <date> | :0,  |` prefix, the quotes and the `Normal info: ok` replies left out:
 
 ```
 [INFO]18:36:04.630 - Auto command executed: buffer M495 X0Y0P1\n
@@ -127,7 +127,7 @@ for run in runs(sorted(LOGS.glob("log_*.txt"))):
 
 It reads the files in date order, so a run that crosses midnight stays whole. Print `run["msgs"]` to read one run in full. Filter on `run["file"].endswith("/name.nc")` to pick a job. `z0` holds the G54 Z after each `M498`; differences between entries are height differences (higher surface, less negative).
 
-`last_probe_run()` in `surface-to-lowest-point/surface-to-lowest-point.py` is the repo's working parser: it takes the newest run of one file name across the logs and collects the G54 Z of each `M498` up to the next `Playing file:`. It works per file, so a run split at midnight comes back short; `plan()` then reports how many points it got instead of guessing. Its tests build fake logs in the same format (`studio_log()` in `tests/test_surface_to_lowest_point.py`).
+`read_logs()` in `probe-stock/stockref.py` is the repo's working parser: it reads every log in date order and returns each file played, with its upload MD5, every `M498` (G54 and REFMZ) and Studio-sent `G10`/`G92` logged until the next `Playing file:`, and whether it reached its final `G28` or stopped (`Aborted`, `ALARM:`, `Soft Endstop`). A run that crosses midnight stays whole. Its tests build fake logs in the same format (`studio_log()` and `Machine` in `tests/helpers.py`).
 
 ## Quoting the log in an issue, commit or PR
 

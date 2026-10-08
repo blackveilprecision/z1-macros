@@ -1,0 +1,5 @@
+# Generated: rebuild with probe-stock.py
+/*.nc
+# This machine's stock and the jobs written for it
+/stock.json
+/jobs.json

@@ -1,55 +1,47 @@
 #!/usr/bin/env python3
-"""Face uneven stock down to its lowest point on the Makera Z1, in two jobs.
+"""Face uneven stock down to its lowest point on the Makera Z1, from probe-stock's reference.
 
 The Z1 firmware (Smoothieware fork, 1.1.2) has no #variables, expressions or
 loops: it reads the number straight after each letter, so Z[#<depth>] is Z0.
-A job can't measure the stock and then decide how deep to cut, so that math
-happens here, between two jobs:
+A job can't measure the stock and then decide how deep to cut, so the
+measuring is its own job: probe-stock (../probe-stock) probes the top and
+saves the heights. This script reads them, rounds the lowest point's
+thickness down to round_to, and writes surface-to-lowest-point.nc, which
+asks for the cutter (T1) and faces down in passes until the stock is that
+thick. It doesn't probe: Z0 stays where it is, and every Z is worked out
+from where Studio's log last showed it.
 
-1. --probe writes surface-to-lowest-point-probe.nc. It probes a grid on the
-   stock with the 3D probe (T0), sets Z0 on each point and prints it to
-   Studio's log with M498. No spindle, no cutting.
-2. Run the script again without --probe. It reads that run back from Studio's
-   log, rounds the lowest point's thickness down to round_to, and writes
-   surface-to-lowest-point.nc. That job doesn't probe: Z0 stays where the probe
-   job left it, on its last point, and the cut is raised by how far the highest
-   point is above that. It asks for the cutter (T1) and faces down in passes
-   until the stock is that thick.
+Each pass only covers the part of the top that reaches it; the last covers
+everything. Once Studio's log shows the job finished, probe-stock counts the
+top as faced, for the next macro.
 
-Edit VARIABLES below (or pass flags, see --help) and upload each .nc to the Z1
-from Makera Studio under its own name: step 2 finds the probe run in the log
-by it. Run Studio's corner probe for X/Y first, and start both jobs with Auto
-leveling OFF (it bends the cut to follow the uneven top).
+Edit VARIABLES below (or pass flags, see --help), upload the .nc to the Z1
+from Makera Studio and start it with Auto leveling OFF (it bends the cut).
 """
 
 import argparse
 import bisect
 import math
-import re
 import sys
 from pathlib import Path
 
-# --- VARIABLES (dimensions are POSITIVE values) ---
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / "probe-stock"))
+import stockref  # noqa: E402
+from stockref import ORIGINS  # noqa: E402
+
+# --- VARIABLES (dimensions are POSITIVE values; the stock's come from probe-stock) ---
 VARIABLES = {
-    "stock_width": 65.4,    # X-axis dimension of stock (the widest, if a side is uneven)
-    "stock_length": 50.4,   # Y-axis dimension of stock
-    "stock_height": 33.0,   # Thickness at the highest probed point (with a fence, only a check on the fence reading)
     "final_height": 0.0,    # Thickness to leave; 0 = the lowest probed point, rounded down to round_to
-    "fence_x": -7.5,        # A point on the fence's top, in job coordinates (from the origin corner): Makera's
-    "fence_y": 77.0,        #   anchor plate, left arm, between a screw hole and the dowel. --no-fence to skip it
-    "fence_height": 5.0,    # Height of the fence's top above the bed the stock sits on
     "round_to": 0.5,        # Round the lowest point's thickness down to a multiple of this
     "tool_dia": 3.175,      # Diameter of your facing bit (the included collet is 1/8")
     "stepover": 2.0,        # Max stepover (2.0 = 63% of 3.175, Makera's 6061 value)
     "cut_along": "y",       # Passes run front to back (y; the Z1 is stiffer in Y) or left to right (x)
     "air_margin": 0.3,      # A pass cuts wherever the probed top is within this of it (the top between probe points)
     "pass_depth": 0.2,      # Depth of cut per pass
-    "probe_grid_x": 5,      # Probe points along X
-    "probe_grid_y": 4,      # Probe points along Y
-    "probe_inset": 3.0,     # Keep probe points this far inside the stock edges
-    "probe_clearance": 5.0, # Lift between probe points; must exceed highest minus lowest thickness
-    "top_margin": 0.2,      # Start cutting this far above Z0, for high spots between probe points or at the edges
-    "origin": "topFrontLeft",  # Studio origin corner: front-left, where the stock's square edges are
+    "finish_depth": 0.1,    # The last pass is a lighter finishing pass this deep over the whole top; 0 = none
+    "finish_stepover": 0.0, # Stepover of the finishing pass; 0 = half the cutter's diameter
+    "top_margin": 0.2,      # Start cutting this far above the highest point, for high spots between probe points
     "rpm": 12000,           # Makera library, 3.175*12mm Flat End (Metal) in 6061
     "feed": 500,            # mm/min cutting feed
     "plunge_feed": 200,     # mm/min plunge feed (plunges happen off the stock)
@@ -61,33 +53,10 @@ LEAD = 2.0            # Tool edge clearance past the X edges of the stock
 FLUTE_LENGTH = 12     # Header only, shown in Studio's tool list
 MAX_FEED = 1200       # Z1 limits from Studio's machine table
 MAX_RPM = 13000
-PROBE_FEED = 300      # Grid probing feed (Studio probes at 500 fast / 100 slow)
-FENCE_CHECK = 2.0     # A fence reading this far from stock_height means the probe probably missed the fence
 LIFT = 0.5            # Between passes, lift this far above the floor just cut to move to the next start
 SAMPLE = 0.25         # Spacing of the checks for material along each row
 
-PROBE_JOB = "surface-to-lowest-point-probe.nc"
 FACE_JOB = "surface-to-lowest-point.nc"
-STUDIO_LOGS = Path.home() / "Library/Application Support/MakeraStudio/logs"  # macOS; pass --log elsewhere
-
-# Studio's log, e.g.
-#   Debug    | 2026-10-04 14:13:27 Sun | :0,  | "[INFO]14:13:27.739 - Playing file: /sd/gcodes/macros/x.nc"
-#   Debug    | 2026-10-04 14:13:28 Sun | :0,  | "[INFO]14:13:28.168 - Normal info: EEPRROM Data: G54: -121.866, -143.602, -67.862\n"
-PLAYING = re.compile(r'Playing file: (.+?)"?\s*$')
-G54 = re.compile(r"EEPRROM Data: G54: (-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)")
-STAMP = re.compile(r"\| (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ")
-G10_SENT = re.compile(r"Normal info: (G10 L2\d? [^\"\\]*)")  # Studio echoes what it sends, e.g. its own Z probe
-
-# Origin corner -> its position in stock coordinates measured from front-left.
-ORIGINS = {
-    "topFrontLeft": (0.0, 0.0),
-    "topFrontRight": (1.0, 0.0),
-    "topBackLeft": (0.0, 1.0),
-    "topBackRight": (1.0, 1.0),
-    "topCenter": (0.5, 0.5),
-}
-
-HERE = Path(__file__).resolve().parent
 
 
 def fmt(value):
@@ -99,14 +68,12 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     for name, default in VARIABLES.items():
         flag = "--" + name.replace("_", "-")
-        if name in ("origin", "cut_along"):
-            p.add_argument(flag, default=default, choices=ORIGINS if name == "origin" else ("x", "y"))
+        if name == "cut_along":
+            p.add_argument(flag, default=default, choices=("x", "y"))
         else:
-            p.add_argument(flag, type=float if default is None else type(default), default=default)
-    p.add_argument("--probe", action="store_true", help=f"write the probe job ({PROBE_JOB}) instead of the facing job")
+            p.add_argument(flag, type=type(default), default=default)
     p.add_argument("--full-passes", action="store_true", help="every pass covers the whole top, even where it only cuts air")
-    p.add_argument("--no-fence", action="store_true", help="don't probe the fence; the highest point is taken to be --stock-height thick")
-    p.add_argument("--log", type=Path, default=STUDIO_LOGS, help="Studio's log folder or one log file (default: %(default)s)")
+    p.add_argument("--log", type=Path, default=stockref.STUDIO_LOGS, help="Studio's log folder or one log file (default: %(default)s)")
     p.add_argument("--tool", help="take tool_dia, rpm, feeds, pass_depth and stepover from this tool in"
                    " ../tool-library (see tool-library/toollib.py list); options you pass still win")
     p.add_argument("--material", default="Aluminum", help="which of the tool's presets to use (default: Aluminum)")
@@ -116,23 +83,19 @@ def parse_args():
 
 def check(v):
     errors = []
-    for name in ("stock_width", "stock_length", "stock_height", "round_to", "tool_dia", "stepover", "pass_depth", "probe_clearance"):
+    for name in ("round_to", "tool_dia", "stepover", "pass_depth"):
         if v[name] <= 0:
             errors.append(f"{name} must be positive")
-    if not 0 <= v["final_height"] < v["stock_height"]:
-        errors.append("final_height must be less than stock_height (0 = from the probe run)")
+    if v["final_height"] < 0:
+        errors.append("final_height can't be negative (0 = from the probe run)")
     if v["stepover"] >= v["tool_dia"]:
         errors.append("stepover must be smaller than tool_dia or ridges are left between passes")
-    if v["top_margin"] < 0 or v["probe_inset"] < 0:
-        errors.append("top_margin and probe_inset can't be negative")
-    if (v["fence_x"] is None) != (v["fence_y"] is None):
-        errors.append("give both fence_x and fence_y, or neither")
-    if v["fence_height"] <= 0:
-        errors.append("fence_height must be positive")
-    if v["air_margin"] < 0:
-        errors.append("air_margin can't be negative")
-    if min(v["probe_grid_x"], v["probe_grid_y"]) < 1:
-        errors.append("probe_grid_x and probe_grid_y must be at least 1")
+    if v["top_margin"] < 0 or v["air_margin"] < 0:
+        errors.append("top_margin and air_margin can't be negative")
+    if not 0 <= v["finish_depth"] <= v["pass_depth"]:
+        errors.append("finish_depth must be between 0 and pass_depth")
+    if not 0 <= v["finish_stepover"] < v["tool_dia"]:
+        errors.append("finish_stepover must be between 0 and tool_dia")
     if not 0 < v["feed"] <= MAX_FEED or not 0 < v["plunge_feed"] <= MAX_FEED:
         errors.append(f"feeds must be between 0 and {MAX_FEED} mm/min")
     if not 0 < v["rpm"] <= MAX_RPM:
@@ -147,172 +110,33 @@ def to_program(v, points):
     return [(u - ox * v["stock_width"], t - oy * v["stock_length"]) for u, t in points]
 
 
-def spread(size, count, inset):
-    if count == 1 or size <= 2 * inset:
-        return [size / 2]
-    return [inset + (size - 2 * inset) * i / (count - 1) for i in range(count)]
+def plan(v, state):
+    """The stock as it is now -> (table rows, thickest, lowest thickness, thickness to leave, shift).
 
-
-def probe_points(v):
-    """Grid inside the stock, serpentine, starting at the corner nearest the origin."""
-    ox, oy = ORIGINS[v["origin"]]
-    us = spread(v["stock_width"], v["probe_grid_x"], v["probe_inset"])
-    ts = spread(v["stock_length"], v["probe_grid_y"], v["probe_inset"])
-    us, ts = (us[::-1] if ox > 0.5 else us), (ts[::-1] if oy > 0.5 else ts)
-    points = [(u, t) for j, t in enumerate(ts) for u in (us if j % 2 == 0 else us[::-1])]
-    return to_program(v, points)
-
-
-def fenced(v):
-    return v["fence_x"] is not None
-
-
-def studio_probe(x, y):
-    """Probe a point the way Studio's own Z probe does, from the top of Z travel, and set Z0 there."""
-    return [
-        "G53 G0 Z-3",
-        f"G90 G0 X{fmt(x)} Y{fmt(y)}",
-        "G38.2 Z-108 F500",
-        "G91 G0 Z1",
-        "G38.2 Z-2 F100",
-        "G10 L20 P0 Z0",
-        "G90",
-        "M498 ; print Z0 (G54) to Studio's log",
-    ]
-
-
-def probe_job(v):
-    """Measure every grid point: Z0 is set on each in turn and M498 prints it to Studio's log.
-
-    With a fence, its top is probed first: it sits fence_height above the bed, so
-    the log gives the bed's height too and every thickness comes from the probe.
-    G38.2 alarms if it touches nothing, so a point more than probe_clearance below
-    the one before (or off the stock) stops the job instead of logging a wrong height.
-    Each G10 stores Z0 (G54) the way Studio's own Z probe does: one EEPROM write.
+    Thicknesses are heights above the bed, which probe-stock measured from the
+    anchor plate (or assumed). shift is how far the highest point is above Z0
+    now: every Z in the job is raised by it.
     """
-    pts = probe_points(v)
-    c = v["probe_clearance"]
-    fence = ["; The fence's top, fence_height above the bed", *studio_probe(v["fence_x"], v["fence_y"])] if fenced(v) else []
-    lines = [
-        "; surface-to-lowest-point probe job, generated by surface-to-lowest-point.py --probe - edit the script, not this file.",
-        f"; Prints the height of {len(pts)} points{' and the fence' if fence else ''} to Studio's log."
-        " No spindle, no cutting. Turn auto-leveling OFF.",
-        "; Then run surface-to-lowest-point.py again: it reads the heights from the log and writes the facing job.",
-        "",
-        "G90 G21",
-        "M370 ; clear any auto-leveling grid left from an earlier job",
-        "",
-        "T0 M6",
-        *fence,
-        "; The stock",
-        *studio_probe(*pts[0]),
-    ]
-    for x, y in pts[1:]:
-        lines += [f"G0 Z{fmt(c)}", f"G0 X{fmt(x)} Y{fmt(y)}", f"G38.2 Z-{fmt(2 * c)} F{PROBE_FEED}", "G10 L20 P0 Z0", "M498"]
-    lines += [f"G0 Z{fmt(SAFE_Z)}", "G28", "M02"]
-    return "\n".join(lines) + "\n"
-
-
-def last_probe_run(where):
-    """The newest run of the probe job in Studio's logs: (time, log file name, entries).
-
-    Entries, in order from the run's start, each with the time it was logged:
-    ("z", Z0) for every M498, during the run and after it; ("g10", line) for every
-    G10 Studio sent; ("played", file) for every file played since. plan() takes the
-    run's points from them, and the Z0 the facing job will start from.
-    """
-    files = sorted(where.glob("log_*.txt")) if where.is_dir() else [where] if where.is_file() else []
-    run = None
-    for path in files:  # oldest first, so a run collects what happened after it, in newer logs too
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                stamp = STAMP.search(line)
-                stamp = stamp.group(1) if stamp else "?"
-                m = PLAYING.search(line)
-                if m:
-                    name = m.group(1).strip()
-                    if name.rsplit("/", 1)[-1] == PROBE_JOB:
-                        run = (stamp, path.name, [])
-                    elif run:
-                        run[2].append(("played", name, stamp))
-                    continue
-                if run is None:
-                    continue
-                m = G54.search(line)
-                if m:
-                    run[2].append(("z", float(m.group(3)), stamp))
-                    continue
-                m = G10_SENT.search(line)
-                if m:
-                    run[2].append(("g10", m.group(1).strip(), stamp))
-    return run
-
-
-def plan(v, run):
-    """The probe run -> (table rows, thickest, lowest thickness, thickness to leave, Z0, where Z0 came from,
-    highest point above Z0).
-
-    With a fence the first value is the fence's top, so the bed is fence_height
-    below it and every thickness is probed. Without one, the highest point is
-    taken to be stock_height thick.
-
-    The facing job doesn't probe; it cuts from the Z0 in the machine. That is where
-    the probe job left it (its last point), or the last Z0 printed since, e.g. by a
-    facing job that probed again. Anything logged after that which could move Z0
-    without printing it (a G10 Studio sent, another job) stops the script. A tool
-    change doesn't move Z0: the new tool is measured against the probe.
-    """
-    when, log, entries = run
-    pts = probe_points(v)
-    expected = len(pts) + fenced(v)
-    points = [i for i, (kind, _, _) in enumerate(entries) if kind == "z"]
-    if len(points) < expected:
-        raise SystemExit(
-            f"surface-to-lowest-point: the last probe run ({when}, {log}) logged {len(points)} of {expected} points."
-            " It stopped early, or the grid or fence options differ from the ones it was written with;"
-            " run the probe job again"
-        )
-    zs = [entries[i][1] for i in points[:expected]]
-    z0, z0_from = zs[-1], "where the probe job left it, on its last point"
-    after = entries[points[expected - 1] + 1:]
-    prints = [i for i, (kind, _, _) in enumerate(after) if kind == "z"]
-    if prints:
-        _, z0, stamp = after[prints[-1]]
-        z0_from = f"printed at {stamp}, after the probe run"
-        after = after[prints[-1] + 1:]
-    moved = [
-        f"Studio sent {value} ({stamp})" if kind == "g10" else f"{value} played ({stamp})"
-        for kind, value, stamp in after
-        if kind == "g10" or (kind == "played" and value.rsplit("/", 1)[-1] != FACE_JOB)
-    ]
-    if moved:
-        raise SystemExit(
-            f"surface-to-lowest-point: Z0 may have moved since it was last printed: {'; '.join(moved[:3])}."
-            " The facing job cuts from the Z0 in the machine, so run the probe job again"
-        )
-    high = max(zs[fenced(v):])
-    bed = zs[0] - v["fence_height"] if fenced(v) else high - v["stock_height"]
-    zs = zs[fenced(v):]
-    thickest = high - bed
-    if fenced(v) and abs(thickest - v["stock_height"]) > FENCE_CHECK:
-        raise SystemExit(
-            f"surface-to-lowest-point: from the fence, the highest point is {thickest:.2f} mm thick, but stock_height"
-            f" is {fmt(v['stock_height'])}. If the probe missed the fence it touched the bed and read"
-            f" {fmt(v['fence_height'])} mm low: check --fence-x/--fence-y. If the stock really is that thick,"
-            " pass --stock-height close to it"
-        )
-    rows = [(x, y, z - high, z - bed) for (x, y), z in zip(pts, zs)]
-    lowest = min(r[3] for r in rows)
+    high = max(h for _, _, h in state.top)
+    rows = [(*state.program(u, t), h - high, h - state.bed) for u, t, h in state.top]
+    thickest, lowest = high - state.bed, min(r[3] for r in rows)
     final = math.floor(lowest / v["round_to"] + 1e-9) * v["round_to"]
     if final <= 0:
-        raise SystemExit("surface-to-lowest-point: that leaves nothing; check --stock-height")
-    return rows, thickest, lowest, final, z0, z0_from, high - z0
+        raise SystemExit("surface-to-lowest-point: that leaves nothing; check the probe run (probe-stock.py show)")
+    return rows, thickest, lowest, final, high - state.z0
+
+
+def finishing(v):
+    """Whether the last pass is a finishing pass: there's a finish depth and more to cut than it."""
+    return 0 < v["finish_depth"] < v["top_margin"] + v["stock_height"] - v["final_height"]
 
 
 def levels(v):
+    """Pass depths from the highest point, down to the final one; with finishing, roughing stops finish_depth above it."""
     top, target = v["top_margin"], v["final_height"] - v["stock_height"]
-    count = math.ceil((top - target) / v["pass_depth"] - 1e-9)
-    return [top - k * v["pass_depth"] for k in range(1, count)] + [target]
+    rough = target + v["finish_depth"] if finishing(v) else target
+    count = math.ceil((top - rough) / v["pass_depth"] - 1e-9)
+    return [top - k * v["pass_depth"] for k in range(1, count)] + [rough] + ([target] if finishing(v) else [])
 
 
 def interp(xs, hs, x):
@@ -351,10 +175,10 @@ def frame(v):
     return v["stock_width"], v["stock_length"], lambda a, b: (a, b)
 
 
-def rows_across(v):
+def rows_across(v, stepover=None):
     """Where the passes run across the stock: both edges and evenly between, no more than stepover apart."""
     _, width, _ = frame(v)
-    n = math.ceil(width / v["stepover"] - 1e-9)
+    n = math.ceil(width / (stepover or v["stepover"]) - 1e-9)
     return [width * i / n for i in range(n + 1)], width / n
 
 
@@ -430,13 +254,15 @@ def layer_path(v, bs, row_spans, near):
 
 
 def build(v, note, z0, shift, top=None):
-    """The facing job. It doesn't probe: Z0 stays where it is (z0, from the log) and the
-    highest point is shift above it, so every Z is raised by shift. Only the cutter
+    """The facing job. It doesn't probe: Z0 stays where it is (G54 Z z0, from the log) and
+    the highest point is shift above it, so every Z is raised by shift. Only the cutter
     goes in, measured against the probe at the tool change.
 
     With a top (from the probe run), each pass but the last only covers the rows and
     stretches that still have material above it; without one (--full-passes) every
-    pass covers the whole top.
+    pass covers the whole top. With finishing, the last roughing pass covers the
+    whole top too, so the finishing pass after it takes the same finish_depth
+    everywhere, on rows finish_stepover apart.
     """
     length, width, stock = frame(v)
     r = v["tool_dia"] / 2
@@ -446,12 +272,16 @@ def build(v, note, z0, shift, top=None):
     zs = [z + shift for z in levels(v)]
     if top:
         samples, profile = material(v, top, bs)
+    fin_bs, fin_step = rows_across(v, v["finish_stepover"] or v["tool_dia"] / 2)
+    fin_rows = [(b, (-(r + LEAD), length + r + LEAD)) for b in fin_bs]
 
     passes, near = [], None  # (level, z, (a, b) points)
     for n, z in enumerate(zs, 1):
-        if not top:
+        if finishing(v) and n == len(zs):
+            path = layer_path(v, fin_bs, [s for _, s in fin_rows], near)
+        elif not top:
             path = full if n % 2 else full[::-1]  # serpentine: each level starts where the last ended
-        elif n == len(zs):
+        elif n >= len(zs) - finishing(v):
             path = layer_path(v, bs, [s for _, s in full_rows], near)
         else:
             row_spans = spans(v, samples, profile, z)
@@ -474,7 +304,7 @@ def build(v, note, z0, shift, top=None):
             body += [f"G0 Z{fmt(floor + LIFT)}", f"G0 X{fmt(x)} Y{fmt(y)}"]
             seconds += (floor + LIFT - z_prev + math.hypot(x - x0, y - y0)) / MAX_FEED * 60
             z_prev = floor + LIFT
-        body.append(f"; Level {n}/{len(zs)} Z{fmt(z)}")
+        body.append(f"; Level {n}/{len(zs)} Z{fmt(z)}" + (", finishing" if finishing(v) and n == len(zs) else ""))
         body.append(f"G1 Z{fmt(z)} F{v['plunge_feed']}")
         seconds += abs(z_prev - z) / v["plunge_feed"] * 60
         feed = f" F{v['feed']}"
@@ -511,6 +341,8 @@ def build(v, note, z0, shift, top=None):
         f"; No probing: Z0 stays where it is, G54 Z {z0:.3f}; the highest point is {fmt(shift)} mm above it.",
         f"; Turn auto-leveling OFF. Cuts Z{fmt(v['top_margin'] + shift)} -> Z{fmt(zs[-1])} in {len(zs)} passes"
         f" of <= {fmt(v['pass_depth'])} mm along {v['cut_along'].upper()}, {fmt(step)} mm stepover, {fmt(d)} mm tool.",
+        *([f"; The last is a finishing pass, {fmt(v['finish_depth'])} mm deep over the whole top at {fmt(fin_step)} mm stepover."]
+          if finishing(v) else []),
         "; " + (
             f"Each pass covers only where the probed top is within {fmt(v['air_margin'])} mm of it; the last covers"
             " the whole top. Every pass starts beyond the stock's edge." if top else "Every pass covers the whole top."
@@ -533,9 +365,7 @@ def build(v, note, z0, shift, top=None):
 def main():
     args = parse_args()
     v = {name: getattr(args, name) for name in VARIABLES}
-    if args.no_fence:
-        v["fence_x"] = v["fence_y"] = None
-    if args.tool:  # the tool library is only needed with --tool, so this script also runs on its own
+    if args.tool:  # the tool library is only needed with --tool, so this script also runs without it
         sys.path.insert(0, str(HERE.parent / "tool-library"))
         import toollib
 
@@ -546,62 +376,49 @@ def main():
         )
     check(v)
 
-    if args.probe:
-        out = args.out or HERE / PROBE_JOB
-        out.write_text(probe_job(v))
-        print(f"wrote {out} ({len(probe_points(v))} points{' and the fence' if fenced(v) else ''}, no cutting)")
-        if out.name != PROBE_JOB:
-            print(f"note: the next step looks for {PROBE_JOB} in Studio's log; upload it under that name")
-        print("upload it, corner-probe X/Y in Studio and run it with Auto leveling off")
-        print("then run this script again without --probe to write the facing job from what it measured")
-        return
-
-    # The facing job cuts from the Z0 the probe job left, so the probe run is always read.
-    run = last_probe_run(args.log)
-    if run is None:
-        raise SystemExit(
-            f"surface-to-lowest-point: no run of {PROBE_JOB} in {args.log}. Write it with --probe and run it"
-            " on the machine first (or pass --log if Studio keeps its logs elsewhere)"
-        )
-    rows, thickest, lowest, final, z0, z0_from, shift = plan(v, run)
+    state = stockref.load(args.log)
+    state.check("surface-to-lowest-point")
+    v.update(stock_width=state.width, stock_length=state.length, origin=state.origin)
+    rows, thickest, lowest, final, shift = plan(v, state)
     high = max(rows, key=lambda r: r[2])
     low = min(rows, key=lambda r: r[3])
-    print(f"Probe run {run[0]} ({run[1]}), {len(rows)} points:")
+    print(f"Probe run {state.probe['stamp']} ({state.probe['log']}), {len(rows)} points:")
     print(f"  {'X':>7} {'Y':>7} {'height':>8} {'thickness':>10}")
     for x, y, height, thick in rows:
         mark = "  highest" if (x, y) == high[:2] else "  lowest" if (x, y) == low[:2] else ""
         print(f"  {x:7.1f} {y:7.1f} {height:8.3f} {thick:10.3f}{mark}")
-    if fenced(v):
-        print(
-            f"Thicknesses are measured from the fence (its top {fmt(v['fence_height'])} mm above the bed,"
-            f" probed at X{fmt(v['fence_x'])} Y{fmt(v['fence_y'])})."
-        )
-    else:
-        print(
-            f"Thickness assumes the stock is {fmt(v['stock_height'])} mm at the highest point (X{fmt(high[0])} Y{fmt(high[1])});"
-            " measure it there and pass --stock-height if not."
-        )
+    print(f"Thicknesses are from {state.bed_from}.")
+    for stamp, text in state.history:
+        print(f"Since then: {stamp} {text}")
+    for note in state.notes:
+        print(f"note: {note}")
+
     given = v["final_height"]
     v["stock_height"] = round(thickest, 3)
     if given > 0:
         if given >= v["stock_height"]:
             raise SystemExit(f"surface-to-lowest-point: --final-height must be less than {thickest:.2f} mm, the highest point")
         print(f"Leaving {fmt(given)} mm, given with --final-height:", end="")
-        note = f"Probe run {run[0]}: highest point {thickest:.2f} mm thick, leaving {fmt(given)} mm (--final-height)."
+        note = f"Probe run {state.probe['stamp']}: highest point {thickest:.2f} mm thick, leaving {fmt(given)} mm (--final-height)."
     else:
+        if final >= thickest - 1e-6:
+            raise SystemExit(
+                f"surface-to-lowest-point: the top is already {thickest:.3f} mm thick everywhere it was probed, so"
+                f" rounding down to {fmt(v['round_to'])} mm leaves nothing to cut. Pass --final-height to go thinner"
+            )
         v["final_height"] = final
         print(f"Lowest point {lowest:.2f} mm, rounded down to {fmt(final)} mm:", end="")
-        note = f"Probe run {run[0]}: lowest point {lowest:.2f} mm thick, leaving {fmt(final)} mm."
+        note = f"Probe run {state.probe['stamp']}: lowest point {lowest:.2f} mm thick, leaving {fmt(final)} mm."
     print(f" cutting {fmt(v['stock_height'] - v['final_height'])} mm below the highest point.")
-    print(f"Z0 is G54 Z {z0:.3f}, {z0_from}: the highest point is {shift:.3f} mm above it.\n")
+    z0 = state.machine.z
+    print(f"Z0 is G54 Z {z0:.3f} (printed {state.machine.stamp}): the highest point is {shift:.3f} mm above it.\n")
 
-    ox, oy = ORIGINS[v["origin"]]
-    top = None if args.full_passes else Top(
-        [(x + ox * v["stock_width"], y + oy * v["stock_length"], height + shift) for x, y, height, _ in rows]
-    )
+    top = None if args.full_passes else stockref_top(state)
     program, passes, seconds = build(v, note, z0, shift, top)
     out = args.out or HERE / FACE_JOB
     out.write_text(program)
+    stockref.record(out, "cut", f"top faced flat, {fmt(v['final_height'])} mm thick",
+                    effect={"type": "top", "h": round(state.bed + v["final_height"], 3)})
     saved = "" if args.full_passes else f", full-width passes would take ~{build(v, note, z0, shift)[2] / 60:.0f}"
     print(
         f"wrote {out} ({passes} passes along {v['cut_along'].upper()}, ~{seconds / 60:.0f} min{saved},"
@@ -610,6 +427,11 @@ def main():
     print(f"clamps and vise jaws must sit below {fmt(v['final_height'])} mm: the cutter runs past the stock edges")
     print("upload it and start it with Auto leveling off, without changing Z0 or running anything else first;")
     print(f"it doesn't probe. Before the cutter goes in, Studio's log should show G54 Z {z0:.3f}: stop the job if not")
+
+
+def stockref_top(state):
+    """The top in the facing job's Z (from Z0 as it is now), stock coordinates."""
+    return Top([(u, t, h - state.z0) for u, t, h in state.top])
 
 
 if __name__ == "__main__":
